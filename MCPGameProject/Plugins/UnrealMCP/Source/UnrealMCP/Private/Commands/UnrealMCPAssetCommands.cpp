@@ -1,12 +1,18 @@
 #include "Commands/UnrealMCPAssetCommands.h"
 
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetToolsModule.h"
 #include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraph/EdGraphSchema.h"
 #include "EditorAssetLibrary.h"
+#include "Engine/Blueprint.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "Serialization/ArchiveReplaceObjectRef.h"
+#include "UObject/ObjectRedirector.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectHash.h"
 #include "UObject/UnrealType.h"
@@ -113,36 +119,159 @@ namespace UnrealMCPAssetPrivate
 		return nullptr;
 	}
 
-	/** Walks a dotted path through struct properties; returns the final property and the container holding it. */
-	FProperty* McpResolvePropertyPath(UObject* Object, const FString& Path, void*& OutContainer, FString& OutError)
+	/** Walks a dotted path through struct properties, array elements written as Name[3], and object properties, which step into the object they point at. Returns the final property, the container holding it and the object that owns that container. */
+	FProperty* McpResolvePropertyPath(UObject* Object, const FString& Path, void*& OutContainer, UObject*& OutOwner, FString& OutError)
 	{
 		TArray<FString> Parts;
 		Path.ParseIntoArray(Parts, TEXT("."));
 		UStruct* Struct = Object->GetClass();
 		void* Container = Object;
+		UObject* Owner = Object;
 		for (int32 Index = 0; Index < Parts.Num(); ++Index)
 		{
-			FProperty* Prop = FindFProperty<FProperty>(Struct, *Parts[Index]);
+			FString Name = Parts[Index];
+			int32 ElementIndex = INDEX_NONE;
+			int32 Bracket = INDEX_NONE;
+			if (Name.FindChar(TEXT('['), Bracket) && Name.EndsWith(TEXT("]")))
+			{
+				ElementIndex = FCString::Atoi(*Name.Mid(Bracket + 1, Name.Len() - Bracket - 2));
+				Name.LeftInline(Bracket);
+			}
+			FProperty* Prop = FindFProperty<FProperty>(Struct, *Name);
 			if (!Prop)
 			{
-				OutError = FString::Printf(TEXT("Property '%s' not found on %s"), *Parts[Index], *Struct->GetName());
+				OutError = FString::Printf(TEXT("Property '%s' not found on %s"), *Name, *Struct->GetName());
 				return nullptr;
+			}
+			if (ElementIndex != INDEX_NONE)
+			{
+				FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop);
+				if (!ArrayProp)
+				{
+					OutError = FString::Printf(TEXT("'%s' is not an array"), *Name);
+					return nullptr;
+				}
+				FScriptArrayHelper Helper(ArrayProp, ArrayProp->ContainerPtrToValuePtr<void>(Container));
+				if (!Helper.IsValidIndex(ElementIndex))
+				{
+					OutError = FString::Printf(TEXT("'%s' has no element %d"), *Name, ElementIndex);
+					return nullptr;
+				}
+				// An array's inner property sits at offset zero, so the element itself serves as its container.
+				Container = Helper.GetRawPtr(ElementIndex);
+				Prop = ArrayProp->Inner;
 			}
 			if (Index == Parts.Num() - 1)
 			{
 				OutContainer = Container;
+				OutOwner = Owner;
 				return Prop;
 			}
-			FStructProperty* StructProp = CastField<FStructProperty>(Prop);
-			if (!StructProp)
+			void* Value = Prop->ContainerPtrToValuePtr<void>(Container);
+			if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
 			{
-				OutError = FString::Printf(TEXT("'%s' is not a struct"), *Parts[Index]);
-				return nullptr;
+				Container = Value;
+				Struct = StructProp->Struct;
+				continue;
 			}
-			Container = StructProp->ContainerPtrToValuePtr<void>(Container);
-			Struct = StructProp->Struct;
+			if (FObjectPropertyBase* ObjectProp = CastField<FObjectPropertyBase>(Prop))
+			{
+				UObject* Inner = ObjectProp->GetObjectPropertyValue(Value);
+				if (!Inner)
+				{
+					OutError = FString::Printf(TEXT("'%s' is empty"), *Name);
+					return nullptr;
+				}
+				Container = Inner;
+				Owner = Inner;
+				Struct = Inner->GetClass();
+				continue;
+			}
+			OutError = FString::Printf(TEXT("'%s' is neither a struct nor an object"), *Name);
+			return nullptr;
 		}
 		return nullptr;
+	}
+
+	bool McpParseObjectMap(const TSharedPtr<FJsonObject>& Params, TMap<UObject*, UObject*>& OutMap, FString& OutError)
+	{
+		const TSharedPtr<FJsonObject>* MapObject = nullptr;
+		if (!Params->TryGetObjectField(TEXT("map"), MapObject))
+		{
+			return true;
+		}
+		for (const auto& Pair : (*MapObject)->Values)
+		{
+			UObject* From = McpLoadAnyObject(Pair.Key);
+			UObject* To = McpLoadAnyObject(Pair.Value->AsString());
+			if (!From || !To)
+			{
+				OutError = FString::Printf(TEXT("Object not found: %s -> %s"), *Pair.Key, *Pair.Value->AsString());
+				return false;
+			}
+			OutMap.Add(From, To);
+			UBlueprint* FromBlueprint = Cast<UBlueprint>(From);
+			UBlueprint* ToBlueprint = Cast<UBlueprint>(To);
+			if (FromBlueprint && ToBlueprint)
+			{
+				if (FromBlueprint->GeneratedClass && ToBlueprint->GeneratedClass)
+				{
+					OutMap.Add(FromBlueprint->GeneratedClass, ToBlueprint->GeneratedClass);
+					OutMap.Add(FromBlueprint->GeneratedClass->GetDefaultObject(), ToBlueprint->GeneratedClass->GetDefaultObject());
+				}
+				if (FromBlueprint->SkeletonGeneratedClass && ToBlueprint->SkeletonGeneratedClass)
+				{
+					OutMap.Add(FromBlueprint->SkeletonGeneratedClass, ToBlueprint->SkeletonGeneratedClass);
+				}
+			}
+		}
+		return true;
+	}
+
+	TArray<TPair<FString, FString>> McpParseTextReplacements(const TSharedPtr<FJsonObject>& Params)
+	{
+		TArray<TPair<FString, FString>> Replacements;
+		const TArray<TSharedPtr<FJsonValue>>* ReplaceArray = nullptr;
+		if (Params->TryGetArrayField(TEXT("text_replace"), ReplaceArray))
+		{
+			for (const TSharedPtr<FJsonValue>& Entry : *ReplaceArray)
+			{
+				const TArray<TSharedPtr<FJsonValue>>& Pair = Entry->AsArray();
+				if (Pair.Num() == 2)
+				{
+					Replacements.Emplace(Pair[0]->AsString(), Pair[1]->AsString());
+				}
+			}
+		}
+		return Replacements;
+	}
+
+	/** Applies every replacement to the string in place and reports whether anything changed. */
+	bool McpReplaceText(FString& Text, const TArray<TPair<FString, FString>>& Replacements)
+	{
+		bool bChanged = false;
+		for (const TPair<FString, FString>& Pair : Replacements)
+		{
+			bChanged |= Text.ReplaceInline(*Pair.Key, *Pair.Value, ESearchCase::CaseSensitive) > 0;
+		}
+		return bChanged;
+	}
+
+	int64 McpReplaceReferencesInPackage(UObject* Asset, const TMap<UObject*, UObject*>& Map)
+	{
+		if (Map.Num() == 0)
+		{
+			return 0;
+		}
+		TArray<UObject*> Objects;
+		GetObjectsWithPackage(Asset->GetOutermost(), Objects, true);
+		int64 Count = 0;
+		for (UObject* Object : Objects)
+		{
+			FArchiveReplaceObjectRef<UObject> Replacer(Object, Map, EArchiveReplaceObjectFlags::IgnoreOuterRef | EArchiveReplaceObjectFlags::IgnoreArchetypeRef);
+			Count += Replacer.GetCount();
+		}
+		return Count;
 	}
 
 	TSharedPtr<FJsonObject> McpDescribeNode(UEdGraphNode* Node)
@@ -191,26 +320,24 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCommand(const FString& Co
 	if (CommandType == TEXT("edgraph_add_node")) return EdGraphAddNode(Params);
 	if (CommandType == TEXT("edgraph_connect")) return EdGraphConnect(Params);
 	if (CommandType == TEXT("edgraph_remove_node")) return EdGraphRemoveNode(Params);
+	if (CommandType == TEXT("blueprint_retarget")) return BlueprintRetarget(Params);
+	if (CommandType == TEXT("fixup_redirectors")) return FixupRedirectors(Params);
+	if (CommandType == TEXT("list_objects")) return ListObjects(Params);
+	if (CommandType == TEXT("rename_object")) return RenameObject(Params);
 	return McpAssetError(FString::Printf(TEXT("Unknown asset command: %s"), *CommandType));
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::ReplaceObjectReferences(const TSharedPtr<FJsonObject>& Params)
 {
 	TMap<UObject*, UObject*> Map;
-	const TSharedPtr<FJsonObject>* MapObject = nullptr;
-	if (!Params->TryGetObjectField(TEXT("map"), MapObject))
+	FString Error;
+	if (!McpParseObjectMap(Params, Map, Error))
+	{
+		return McpAssetError(Error);
+	}
+	if (Map.Num() == 0)
 	{
 		return McpAssetError(TEXT("map is required"));
-	}
-	for (const auto& Pair : (*MapObject)->Values)
-	{
-		UObject* From = McpLoadAnyObject(Pair.Key);
-		UObject* To = McpLoadAnyObject(Pair.Value->AsString());
-		if (!From || !To)
-		{
-			return McpAssetError(FString::Printf(TEXT("Object not found: %s -> %s"), *Pair.Key, *Pair.Value->AsString()));
-		}
-		Map.Add(From, To);
 	}
 
 	TArray<TSharedPtr<FJsonValue>> Report;
@@ -222,14 +349,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::ReplaceObjectReferences(const T
 			Report.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("missing %s"), *Value->AsString())));
 			continue;
 		}
-		TArray<UObject*> Objects;
-		GetObjectsWithPackage(Asset->GetOutermost(), Objects, true);
-		int64 Count = 0;
-		for (UObject* Object : Objects)
-		{
-			FArchiveReplaceObjectRef<UObject> Replacer(Object, Map, EArchiveReplaceObjectFlags::IgnoreOuterRef | EArchiveReplaceObjectFlags::IgnoreArchetypeRef);
-			Count += Replacer.GetCount();
-		}
+		const int64 Count = McpReplaceReferencesInPackage(Asset, Map);
 		if (Count > 0)
 		{
 			Asset->Modify();
@@ -254,15 +374,17 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::CreateSubobject(const TSharedPt
 		return McpAssetError(TEXT("object or class not found"));
 	}
 	void* Container = nullptr;
+	UObject* Owner = nullptr;
 	FString Error;
-	FProperty* Prop = McpResolvePropertyPath(Object, Params->GetStringField(TEXT("property")), Container, Error);
+	FProperty* Prop = McpResolvePropertyPath(Object, Params->GetStringField(TEXT("property")), Container, Owner, Error);
 	if (!Prop)
 	{
 		return McpAssetError(Error);
 	}
 
 	Object->Modify();
-	UObject* Created = NewObject<UObject>(Object, Class, NAME_None, RF_Transactional);
+	Owner->Modify();
+	UObject* Created = NewObject<UObject>(Owner, Class, NAME_None, RF_Transactional);
 	if (FObjectPropertyBase* ObjectProp = CastField<FObjectPropertyBase>(Prop))
 	{
 		ObjectProp->SetObjectPropertyValue_InContainer(Container, Created);
@@ -279,7 +401,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::CreateSubobject(const TSharedPt
 		return McpAssetError(TEXT("property is neither an object nor an array of objects"));
 	}
 	FPropertyChangedEvent Changed(Prop, EPropertyChangeType::ValueSet);
-	Object->PostEditChangeProperty(Changed);
+	Owner->PostEditChangeProperty(Changed);
+	if (Owner != Object)
+	{
+		Object->PostEditChange();
+	}
 	McpSaveOwningAsset(Object);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -430,5 +556,193 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::EdGraphRemoveNode(const TShared
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::BlueprintRetarget(const TSharedPtr<FJsonObject>& Params)
+{
+	UBlueprint* Blueprint = Cast<UBlueprint>(McpLoadAnyObject(Params->GetStringField(TEXT("blueprint"))));
+	if (!Blueprint)
+	{
+		return McpAssetError(TEXT("Blueprint not found"));
+	}
+	TMap<UObject*, UObject*> Map;
+	FString Error;
+	if (!McpParseObjectMap(Params, Map, Error))
+	{
+		return McpAssetError(Error);
+	}
+	const TArray<TPair<FString, FString>> Replacements = McpParseTextReplacements(Params);
+
+	Blueprint->Modify();
+	const int64 References = McpReplaceReferencesInPackage(Blueprint, Map);
+
+	int32 TextEdits = 0;
+	TArray<UEdGraph*> Graphs;
+	Blueprint->GetAllGraphs(Graphs);
+	for (UEdGraph* Graph : Graphs)
+	{
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (!Node)
+			{
+				continue;
+			}
+			Node->Modify();
+			TextEdits += McpReplaceText(Node->NodeComment, Replacements) ? 1 : 0;
+			for (UEdGraphPin* Pin : Node->Pins)
+			{
+				if (Pin)
+				{
+					TextEdits += McpReplaceText(Pin->DefaultValue, Replacements) ? 1 : 0;
+				}
+			}
+		}
+	}
+	for (FBPVariableDescription& Variable : Blueprint->NewVariables)
+	{
+		TextEdits += McpReplaceText(Variable.DefaultValue, Replacements) ? 1 : 0;
+	}
+
+	FBlueprintEditorUtils::RefreshAllNodes(Blueprint);
+	FKismetEditorUtilities::CompileBlueprint(Blueprint);
+
+	// A compile rebuilds the default object from the previous one, so class defaults are rewritten after it.
+	if (Replacements.Num() > 0 && Blueprint->GeneratedClass)
+	{
+		UObject* Defaults = Blueprint->GeneratedClass->GetDefaultObject();
+		Defaults->Modify();
+		for (TFieldIterator<FProperty> It(Blueprint->GeneratedClass); It; ++It)
+		{
+			if (It->HasAnyPropertyFlags(CPF_Transient | CPF_Deprecated | CPF_DuplicateTransient))
+			{
+				continue;
+			}
+			FString Text;
+			It->ExportTextItem_InContainer(Text, Defaults, nullptr, Defaults, PPF_None);
+			if (McpReplaceText(Text, Replacements) && It->ImportText_InContainer(*Text, Defaults, Defaults, PPF_None))
+			{
+				++TextEdits;
+			}
+		}
+		Defaults->PostEditChange();
+	}
+
+	McpSaveOwningAsset(Blueprint);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), Blueprint->Status != BS_Error);
+	Result->SetNumberField(TEXT("references"), static_cast<double>(References));
+	Result->SetNumberField(TEXT("text_edits"), TextEdits);
+	Result->SetStringField(TEXT("status"), Blueprint->Status == BS_Error ? TEXT("error") : (Blueprint->Status == BS_UpToDateWithWarnings ? TEXT("warnings") : TEXT("ok")));
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::FixupRedirectors(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Path = Params->GetStringField(TEXT("path"));
+	IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+	FARFilter Filter;
+	Filter.PackagePaths.Add(FName(*Path));
+	Filter.bRecursivePaths = true;
+	Filter.ClassPaths.Add(UObjectRedirector::StaticClass()->GetClassPathName());
+	TArray<FAssetData> Found;
+	Registry.GetAssets(Filter, Found);
+
+	TArray<UObjectRedirector*> Redirectors;
+	for (const FAssetData& Data : Found)
+	{
+		if (UObjectRedirector* Redirector = Cast<UObjectRedirector>(Data.GetAsset()))
+		{
+			Redirectors.Add(Redirector);
+		}
+	}
+	if (Redirectors.Num() > 0)
+	{
+		// Leaving the redirectors avoids the engine's delete prompt, which is modal; each one is deleted below once nothing references it.
+		FAssetToolsModule::GetModule().Get().FixupReferencers(Redirectors, /*bCheckoutDialogPrompt*/ false, ERedirectFixupMode::LeaveFixedUpRedirectors);
+		TArray<UObject*> Unreferenced;
+		for (UObjectRedirector* Redirector : Redirectors)
+		{
+			TArray<FName> Referencers;
+			Registry.GetReferencers(Redirector->GetOutermost()->GetFName(), Referencers);
+			Referencers.Remove(Redirector->GetOutermost()->GetFName());
+			if (Referencers.Num() == 0)
+			{
+				Unreferenced.AddUnique(Redirector);
+			}
+		}
+		for (UObject* Redirector : Unreferenced)
+		{
+			UEditorAssetLibrary::DeleteLoadedAsset(Redirector);
+		}
+	}
+
+	TArray<FAssetData> Left;
+	Registry.GetAssets(Filter, Left);
+	TArray<TSharedPtr<FJsonValue>> Remaining;
+	for (const FAssetData& Data : Left)
+	{
+		Remaining.Add(MakeShared<FJsonValueString>(Data.PackageName.ToString()));
+	}
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), Remaining.Num() == 0);
+	Result->SetNumberField(TEXT("fixed"), Redirectors.Num());
+	Result->SetArrayField(TEXT("remaining"), Remaining);
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::ListObjects(const TSharedPtr<FJsonObject>& Params)
+{
+	UObject* Asset = McpLoadAnyObject(Params->GetStringField(TEXT("asset")));
+	if (!Asset)
+	{
+		return McpAssetError(TEXT("asset not found"));
+	}
+	FString Contains;
+	Params->TryGetStringField(TEXT("contains"), Contains);
+	TArray<UObject*> Objects;
+	GetObjectsWithPackage(Asset->GetOutermost(), Objects, true);
+	TArray<TSharedPtr<FJsonValue>> Out;
+	for (UObject* Object : Objects)
+	{
+		if (!Contains.IsEmpty() && !Object->GetName().Contains(Contains))
+		{
+			continue;
+		}
+		TSharedPtr<FJsonObject> Entry = MakeShared<FJsonObject>();
+		Entry->SetStringField(TEXT("path"), Object->GetPathName());
+		Entry->SetStringField(TEXT("class"), Object->GetClass()->GetPathName());
+		Out.Add(MakeShared<FJsonValueObject>(Entry));
+	}
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetArrayField(TEXT("objects"), Out);
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::RenameObject(const TSharedPtr<FJsonObject>& Params)
+{
+	UObject* Object = McpLoadAnyObject(Params->GetStringField(TEXT("object")));
+	const FString NewName = Params->GetStringField(TEXT("new_name"));
+	if (!Object || NewName.IsEmpty())
+	{
+		return McpAssetError(TEXT("object not found or new_name empty"));
+	}
+	if (Object->IsAsset())
+	{
+		return McpAssetError(TEXT("object is an asset; rename assets through the asset tools"));
+	}
+	if (!Object->Rename(*NewName, nullptr, REN_Test))
+	{
+		return McpAssetError(TEXT("an object with that name already exists in the same outer"));
+	}
+	Object->Modify();
+	Object->Rename(*NewName, nullptr, REN_DontCreateRedirectors);
+	McpSaveOwningAsset(Object);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	Result->SetStringField(TEXT("path"), Object->GetPathName());
 	return Result;
 }

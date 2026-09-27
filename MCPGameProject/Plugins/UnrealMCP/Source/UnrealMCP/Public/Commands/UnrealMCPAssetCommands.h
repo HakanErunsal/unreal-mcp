@@ -5,7 +5,7 @@
 
 /**
  * Generic asset and graph surgery for any asset type.
- * Commands: replace_object_references, create_subobject, export_properties, edgraph_describe, edgraph_add_node, edgraph_connect, edgraph_remove_node.
+ * Commands: replace_object_references, create_subobject, export_properties, edgraph_describe, edgraph_add_node, edgraph_connect, edgraph_remove_node, blueprint_retarget, fixup_redirectors, list_objects, rename_object.
  */
 class UNREALMCP_API FUnrealMCPAssetCommands
 {
@@ -33,4 +33,16 @@ private:
 
 	/** {graph:path, node:name}. Breaks the node's links and removes it. */
 	TSharedPtr<FJsonObject> EdGraphRemoveNode(const TSharedPtr<FJsonObject>& Params);
+
+	/** {blueprint:path, map:{old_object_path:new_object_path}, text_replace:[[from,to]]}. Points every reference inside the Blueprint at its mapped object (a mapped Blueprint also maps its generated class), rewrites pin defaults, variable defaults, node comments and class defaults through the text replacements, then refreshes every node, compiles and saves. */
+	TSharedPtr<FJsonObject> BlueprintRetarget(const TSharedPtr<FJsonObject>& Params);
+
+	/** {path:folder}. Points every referencer of each redirector under the folder at the redirector's target, saves them, and deletes each redirector nothing references any more, without the engine's delete prompt. */
+	TSharedPtr<FJsonObject> FixupRedirectors(const TSharedPtr<FJsonObject>& Params);
+
+	/** {asset:path, contains:text}. Lists every object in the asset's package with its class and outer, optionally only those whose name contains the text. */
+	TSharedPtr<FJsonObject> ListObjects(const TSharedPtr<FJsonObject>& Params);
+
+	/** {object:path, new_name:name}. Renames an object inside its package without leaving a redirector, then saves the package. */
+	TSharedPtr<FJsonObject> RenameObject(const TSharedPtr<FJsonObject>& Params);
 };

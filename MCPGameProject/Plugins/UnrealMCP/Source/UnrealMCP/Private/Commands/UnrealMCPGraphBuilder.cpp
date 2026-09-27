@@ -310,22 +310,48 @@ namespace UnrealMCPGraph
 		}
 	}
 
-	/** Sets a reflected property on an object from text, following a dotted path through structs. */
+	/** Sets a property by a dotted path. Steps through struct properties, array elements written as Name[3], and object properties, which step into the object they point at. */
 	bool SetPropertyByPath(UObject* Object, const FString& Path, const FString& Value, FString& OutError)
 	{
 		TArray<FString> Parts;
 		Path.ParseIntoArray(Parts, TEXT("."));
 		UStruct* Struct = Object->GetClass();
 		void* Container = Object;
+		UObject* Owner = Object;
 		for (int32 i = 0; i < Parts.Num(); ++i)
 		{
-			FProperty* Prop = FindFProperty<FProperty>(Struct, *Parts[i]);
+			FString Name = Parts[i];
+			int32 ElementIndex = INDEX_NONE;
+			int32 Bracket = INDEX_NONE;
+			if (Name.FindChar(TEXT('['), Bracket) && Name.EndsWith(TEXT("]")))
+			{
+				ElementIndex = FCString::Atoi(*Name.Mid(Bracket + 1, Name.Len() - Bracket - 2));
+				Name.LeftInline(Bracket);
+			}
+			FProperty* Prop = FindFProperty<FProperty>(Struct, *Name);
 			if (!Prop)
 			{
-				OutError = FString::Printf(TEXT("Property '%s' not found on %s"), *Parts[i], *Struct->GetName());
+				OutError = FString::Printf(TEXT("Property '%s' not found on %s"), *Name, *Struct->GetName());
 				return false;
 			}
 			void* ValuePtr = Prop->ContainerPtrToValuePtr<void>(Container);
+			if (ElementIndex != INDEX_NONE)
+			{
+				FArrayProperty* ArrayProp = CastField<FArrayProperty>(Prop);
+				if (!ArrayProp)
+				{
+					OutError = FString::Printf(TEXT("'%s' is not an array"), *Name);
+					return false;
+				}
+				FScriptArrayHelper Helper(ArrayProp, ValuePtr);
+				if (!Helper.IsValidIndex(ElementIndex))
+				{
+					OutError = FString::Printf(TEXT("'%s' has no element %d"), *Name, ElementIndex);
+					return false;
+				}
+				ValuePtr = Helper.GetRawPtr(ElementIndex);
+				Prop = ArrayProp->Inner;
+			}
 			if (i == Parts.Num() - 1)
 			{
 				if (FObjectPropertyBase* ObjProp = CastField<FObjectPropertyBase>(Prop); ObjProp && Value.StartsWith(TEXT("/")))
@@ -338,21 +364,39 @@ namespace UnrealMCPGraph
 					ObjProp->SetObjectPropertyValue(ValuePtr, Loaded);
 					return Loaded != nullptr;
 				}
-				if (!Prop->ImportText_Direct(*Value, ValuePtr, Object, PPF_None))
+				if (!Prop->ImportText_Direct(*Value, ValuePtr, Owner, PPF_None))
 				{
 					OutError = FString::Printf(TEXT("Could not set %s to '%s'"), *Path, *Value);
 					return false;
 				}
+				if (Owner != Object)
+				{
+					Owner->Modify();
+					Owner->PostEditChange();
+				}
 				return true;
 			}
-			FStructProperty* StructProp = CastField<FStructProperty>(Prop);
-			if (!StructProp)
+			if (FStructProperty* StructProp = CastField<FStructProperty>(Prop))
 			{
-				OutError = FString::Printf(TEXT("'%s' is not a struct"), *Parts[i]);
-				return false;
+				Struct = StructProp->Struct;
+				Container = ValuePtr;
+				continue;
 			}
-			Struct = StructProp->Struct;
-			Container = ValuePtr;
+			if (FObjectPropertyBase* ObjectProp = CastField<FObjectPropertyBase>(Prop))
+			{
+				UObject* Inner = ObjectProp->GetObjectPropertyValue(ValuePtr);
+				if (!Inner)
+				{
+					OutError = FString::Printf(TEXT("'%s' is empty"), *Name);
+					return false;
+				}
+				Struct = Inner->GetClass();
+				Container = Inner;
+				Owner = Inner;
+				continue;
+			}
+			OutError = FString::Printf(TEXT("'%s' is neither a struct nor an object"), *Name);
+			return false;
 		}
 		return false;
 	}
