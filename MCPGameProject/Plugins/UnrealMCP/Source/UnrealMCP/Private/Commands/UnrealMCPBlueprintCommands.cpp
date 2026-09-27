@@ -79,6 +79,13 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
     // Check if blueprint already exists
     FString PackagePath = TEXT("/Game/Blueprints/");
     FString AssetName = BlueprintName;
+    // A name starting with "/" is a full package path; split it into folder and asset name.
+    int32 LastSlash = INDEX_NONE;
+    if (BlueprintName.StartsWith(TEXT("/")) && BlueprintName.FindLastChar(TEXT('/'), LastSlash) && LastSlash > 0)
+    {
+        PackagePath = BlueprintName.Left(LastSlash + 1);
+        AssetName = BlueprintName.Mid(LastSlash + 1);
+    }
     if (UEditorAssetLibrary::DoesAssetExist(PackagePath + AssetName))
     {
         return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Blueprint already exists: %s"), *BlueprintName));
@@ -113,17 +120,32 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
         {
             FoundClass = AActor::StaticClass();
         }
+        else if (ParentClass.Contains(TEXT(".")))
+        {
+            // Full object path, native (/Script/UPCGame.UPCCharacterBase) or Blueprint (/Path/BP_X.BP_X_C).
+            FoundClass = LoadClass<UObject>(nullptr, *ParentClass);
+        }
         else
         {
             // Try loading the class using LoadClass which is more reliable than FindObject
             const FString ClassPath = FString::Printf(TEXT("/Script/Engine.%s"), *ClassName);
             FoundClass = LoadClass<AActor>(nullptr, *ClassPath);
-            
+
             if (!FoundClass)
             {
                 // Try alternate paths if not found
                 const FString GameClassPath = FString::Printf(TEXT("/Script/Game.%s"), *ClassName);
                 FoundClass = LoadClass<AActor>(nullptr, *GameClassPath);
+            }
+
+            // Any loaded native class in any module, with or without the A prefix (UObject classes such as BTTask_BlueprintBase).
+            if (!FoundClass)
+            {
+                FoundClass = FindFirstObject<UClass>(*ParentClass, EFindFirstObjectOptions::NativeFirst);
+            }
+            if (!FoundClass)
+            {
+                FoundClass = FindFirstObject<UClass>(*ClassName, EFindFirstObjectOptions::NativeFirst);
             }
         }
 
@@ -134,8 +156,7 @@ TSharedPtr<FJsonObject> FUnrealMCPBlueprintCommands::HandleCreateBlueprint(const
         }
         else
         {
-            UE_LOG(LogTemp, Warning, TEXT("Could not find specified parent class '%s' at paths: /Script/Engine.%s or /Script/Game.%s, defaulting to AActor"), 
-                *ClassName, *ClassName, *ClassName);
+            return FUnrealMCPCommonUtils::CreateErrorResponse(FString::Printf(TEXT("Parent class not found: %s"), *ParentClass));
         }
     }
     

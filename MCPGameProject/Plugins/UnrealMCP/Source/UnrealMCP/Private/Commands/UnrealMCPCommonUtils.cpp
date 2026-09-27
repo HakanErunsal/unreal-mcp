@@ -153,7 +153,8 @@ UBlueprint* FUnrealMCPCommonUtils::FindBlueprint(const FString& BlueprintName)
 
 UBlueprint* FUnrealMCPCommonUtils::FindBlueprintByName(const FString& BlueprintName)
 {
-    FString AssetPath = TEXT("/Game/Blueprints/") + BlueprintName;
+    // A name starting with "/" is a full package path such as /UniversalPlayerCombat/Demo/Showcase/Enemy/BP_UPC_Enemy.
+    FString AssetPath = BlueprintName.StartsWith(TEXT("/")) ? BlueprintName : TEXT("/Game/Blueprints/") + BlueprintName;
     return LoadObject<UBlueprint>(nullptr, *AssetPath);
 }
 

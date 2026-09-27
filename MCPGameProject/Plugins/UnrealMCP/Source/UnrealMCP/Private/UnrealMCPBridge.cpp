@@ -22,6 +22,8 @@
 #include "Engine/Selection.h"
 #include "Kismet/GameplayStatics.h"
 #include "Async/Async.h"
+#include "IPythonScriptPlugin.h"
+#include "PythonScriptTypes.h"
 // Add Blueprint related includes
 #include "Engine/Blueprint.h"
 #include "Engine/BlueprintGeneratedClass.h"
@@ -57,6 +59,7 @@
 #include "Commands/UnrealMCPProjectCommands.h"
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "Commands/UnrealMCPUMGCommands.h"
+#include "Commands/UnrealMCPGraphBuilder.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -278,6 +281,17 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             {
                 ResultJson = UMGCommands->HandleCommand(CommandType, Params);
             }
+            else if (CommandType == TEXT("add_variables") || CommandType == TEXT("build_graph") ||
+                     CommandType == TEXT("build_blackboard") || CommandType == TEXT("build_behavior_tree") ||
+                     CommandType == TEXT("describe_graph") || CommandType == TEXT("set_properties") || CommandType == TEXT("build_widget") || CommandType == TEXT("recolor_comments") || CommandType == TEXT("list_comments") || CommandType == TEXT("describe_widget") || CommandType == TEXT("set_comment"))
+            {
+                static FUnrealMCPGraphBuilder GraphBuilder;
+                ResultJson = GraphBuilder.HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("execute_python"))
+            {
+                ResultJson = ExecutePython(Params);
+            }
             else
             {
                 ResponseJson->SetStringField(TEXT("status"), TEXT("error"));
@@ -329,4 +343,57 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
     });
     
     return Future.Get();
+}
+
+// Runs a Python file (params.file) or a short literal (params.code) in the editor and returns its log output.
+TSharedPtr<FJsonObject> UUnrealMCPBridge::ExecutePython(const TSharedPtr<FJsonObject>& Params)
+{
+    TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+    IPythonScriptPlugin* Python = IPythonScriptPlugin::Get();
+    if (!Python || !Python->IsPythonAvailable())
+    {
+        Result->SetBoolField(TEXT("success"), false);
+        Result->SetStringField(TEXT("error"), TEXT("Python is not available in this editor"));
+        return Result;
+    }
+
+    FString File, Code;
+    Params->TryGetStringField(TEXT("file"), File);
+    Params->TryGetStringField(TEXT("code"), Code);
+
+    FPythonCommandEx Command;
+    Command.ExecutionMode = EPythonCommandExecutionMode::ExecuteFile;
+    Command.FileExecutionScope = EPythonFileExecutionScope::Public;
+    Command.Command = File.IsEmpty() ? Code : File;
+    if (Command.Command.IsEmpty())
+    {
+        Result->SetBoolField(TEXT("success"), false);
+        Result->SetStringField(TEXT("error"), TEXT("Missing 'file' or 'code' parameter"));
+        return Result;
+    }
+
+    const bool bOk = Python->ExecPythonCommandEx(Command);
+
+    FString Output;
+    for (const FPythonLogOutputEntry& Entry : Command.LogOutput)
+    {
+        if (Entry.Type != EPythonLogOutputType::Info)
+        {
+            Output += FString::Printf(TEXT("[%s] "), LexToString(Entry.Type));
+        }
+        Output += Entry.Output;
+        if (!Output.EndsWith(TEXT("\n")))
+        {
+            Output += TEXT("\n");
+        }
+    }
+
+    Result->SetBoolField(TEXT("success"), bOk);
+    Result->SetStringField(TEXT("output"), Output);
+    Result->SetStringField(TEXT("result"), Command.CommandResult);
+    if (!bOk)
+    {
+        Result->SetStringField(TEXT("error"), Output.IsEmpty() ? Command.CommandResult : Output);
+    }
+    return Result;
 }

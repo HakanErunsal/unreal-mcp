@@ -43,6 +43,11 @@ public class UnrealMCP : ModuleRules
 			{
 				"UnrealEd",
 				"EditorScriptingUtilities",
+				"PythonScriptPlugin",
+				"AIModule",
+				"AIGraph",
+				"BehaviorTreeEditor",
+				"GameplayTasks",
 				"EditorSubsystem",
 				"Slate",
 				"SlateCore",
@@ -51,7 +56,9 @@ public class UnrealMCP : ModuleRules
 				"KismetCompiler",
 				"BlueprintGraph",
 				"Projects",
-				"AssetRegistry"
+				"AssetRegistry",
+				"EnhancedInput",
+				"InputBlueprintNodes"
 			}
 		);
 		
