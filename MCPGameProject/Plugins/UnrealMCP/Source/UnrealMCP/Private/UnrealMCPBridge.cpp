@@ -61,6 +61,7 @@
 #include "Commands/UnrealMCPUMGCommands.h"
 #include "Commands/UnrealMCPGraphBuilder.h"
 #include "Commands/UnrealMCPAnimCommands.h"
+#include "Commands/UnrealMCPAssetCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -293,6 +294,12 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             {
                 static FUnrealMCPAnimCommands AnimCommands;
                 ResultJson = AnimCommands.HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("replace_object_references") || CommandType == TEXT("create_subobject") || CommandType == TEXT("export_properties") ||
+                     CommandType == TEXT("edgraph_describe") || CommandType == TEXT("edgraph_add_node") || CommandType == TEXT("edgraph_connect") || CommandType == TEXT("edgraph_remove_node"))
+            {
+                static FUnrealMCPAssetCommands AssetCommands;
+                ResultJson = AssetCommands.HandleCommand(CommandType, Params);
             }
             else if (CommandType == TEXT("execute_python"))
             {

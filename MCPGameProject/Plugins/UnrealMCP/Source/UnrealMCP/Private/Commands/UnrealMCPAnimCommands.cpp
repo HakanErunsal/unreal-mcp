@@ -9,9 +9,9 @@
 #include "Dom/JsonValue.h"
 #include "UObject/UnrealType.h"
 
-namespace
+namespace UnrealMCPAnimPrivate
 {
-	TSharedPtr<FJsonObject> AnimError(const FString& Message)
+	TSharedPtr<FJsonObject> McpAnimError(const FString& Message)
 	{
 		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("success"), false);
@@ -20,7 +20,7 @@ namespace
 	}
 
 	template <typename T>
-	T* LoadAssetByPath(const FString& Path)
+	T* McpLoadAssetByPath(const FString& Path)
 	{
 		if (T* Found = LoadObject<T>(nullptr, *Path))
 		{
@@ -29,7 +29,7 @@ namespace
 		return LoadObject<T>(nullptr, *(Path + TEXT(".") + FPackageName::GetShortName(Path)));
 	}
 
-	UClass* LoadClassByPath(const FString& Path)
+	UClass* McpLoadClassByPath(const FString& Path)
 	{
 		if (UClass* Found = LoadObject<UClass>(nullptr, *Path))
 		{
@@ -38,7 +38,7 @@ namespace
 		return FindFirstObject<UClass>(*Path, EFindFirstObjectOptions::None);
 	}
 
-	FString ExportProperty(const FProperty* Property, const void* Container, UObject* Owner)
+	FString McpExportProperty(const FProperty* Property, const void* Container, UObject* Owner)
 	{
 		FString Text;
 		Property->ExportTextItem_InContainer(Text, Container, nullptr, Owner, PPF_None);
@@ -46,7 +46,7 @@ namespace
 	}
 
 	/** Copies every editable property the two classes share by name, round-tripping through text so structs and tags that differ only in their type name still carry across. */
-	void CopySharedProperties(UObject* From, UObject* To, const TArray<TPair<FString, FString>>& Replacements, TArray<TSharedPtr<FJsonValue>>& OutLog)
+	void McpCopySharedProperties(UObject* From, UObject* To, const TArray<TPair<FString, FString>>& Replacements, TArray<TSharedPtr<FJsonValue>>& OutLog)
 	{
 		for (TFieldIterator<FProperty> It(From->GetClass()); It; ++It)
 		{
@@ -61,7 +61,7 @@ namespace
 				OutLog.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("dropped %s (no such property on %s)"), *Source->GetName(), *To->GetClass()->GetName())));
 				continue;
 			}
-			FString Text = ExportProperty(Source, From, From);
+			FString Text = McpExportProperty(Source, From, From);
 			for (const TPair<FString, FString>& Pair : Replacements)
 			{
 				Text.ReplaceInline(*Pair.Key, *Pair.Value, ESearchCase::CaseSensitive);
@@ -73,27 +73,29 @@ namespace
 		}
 	}
 
-	void SaveAsset(UObject* Asset)
+	void McpSaveAsset(UObject* Asset)
 	{
 		Asset->MarkPackageDirty();
 		UEditorAssetLibrary::SaveLoadedAsset(Asset, false);
 	}
 }
 
+using namespace UnrealMCPAnimPrivate;
+
 TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
 {
 	if (CommandType == TEXT("replace_skeleton")) return ReplaceSkeleton(Params);
 	if (CommandType == TEXT("replace_notify_classes")) return ReplaceNotifyClasses(Params);
 	if (CommandType == TEXT("describe_notifies")) return DescribeNotifies(Params);
-	return AnimError(FString::Printf(TEXT("Unknown anim command: %s"), *CommandType));
+	return McpAnimError(FString::Printf(TEXT("Unknown anim command: %s"), *CommandType));
 }
 
 TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceSkeleton(const TSharedPtr<FJsonObject>& Params)
 {
-	USkeleton* Skeleton = LoadAssetByPath<USkeleton>(Params->GetStringField(TEXT("skeleton")));
+	USkeleton* Skeleton = McpLoadAssetByPath<USkeleton>(Params->GetStringField(TEXT("skeleton")));
 	if (!Skeleton)
 	{
-		return AnimError(TEXT("Skeleton not found"));
+		return McpAnimError(TEXT("Skeleton not found"));
 	}
 	const bool bConvertSpaces = Params->HasField(TEXT("convert_spaces")) && Params->GetBoolField(TEXT("convert_spaces"));
 
@@ -102,7 +104,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceSkeleton(const TSharedPtr
 	for (const TSharedPtr<FJsonValue>& Value : Params->GetArrayField(TEXT("assets")))
 	{
 		const FString Path = Value->AsString();
-		UAnimationAsset* Asset = LoadAssetByPath<UAnimationAsset>(Path);
+		UAnimationAsset* Asset = McpLoadAssetByPath<UAnimationAsset>(Path);
 		if (!Asset)
 		{
 			Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("not an animation asset: %s"), *Path)));
@@ -115,7 +117,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceSkeleton(const TSharedPtr
 			continue;
 		}
 		Asset->PostEditChange();
-		SaveAsset(Asset);
+		McpSaveAsset(Asset);
 		Done.Add(MakeShared<FJsonValueString>(Path));
 	}
 
@@ -128,10 +130,10 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceSkeleton(const TSharedPtr
 
 TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceNotifyClasses(const TSharedPtr<FJsonObject>& Params)
 {
-	UAnimSequenceBase* Asset = LoadAssetByPath<UAnimSequenceBase>(Params->GetStringField(TEXT("asset")));
+	UAnimSequenceBase* Asset = McpLoadAssetByPath<UAnimSequenceBase>(Params->GetStringField(TEXT("asset")));
 	if (!Asset)
 	{
-		return AnimError(TEXT("Animation not found"));
+		return McpAnimError(TEXT("Animation not found"));
 	}
 
 	TMap<UClass*, UClass*> ClassMap;
@@ -140,11 +142,11 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceNotifyClasses(const TShar
 	{
 		for (const auto& Pair : (*MapObject)->Values)
 		{
-			UClass* From = LoadClassByPath(Pair.Key);
-			UClass* To = LoadClassByPath(Pair.Value->AsString());
+			UClass* From = McpLoadClassByPath(Pair.Key);
+			UClass* To = McpLoadClassByPath(Pair.Value->AsString());
 			if (!From || !To)
 			{
-				return AnimError(FString::Printf(TEXT("Class not found: %s -> %s"), *Pair.Key, *Pair.Value->AsString()));
+				return McpAnimError(FString::Printf(TEXT("Class not found: %s -> %s"), *Pair.Key, *Pair.Value->AsString()));
 			}
 			ClassMap.Add(From, To);
 		}
@@ -176,7 +178,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceNotifyClasses(const TShar
 			continue;
 		}
 		UObject* Replacement = NewObject<UObject>(Asset, *NewClass, NAME_None, RF_Transactional);
-		CopySharedProperties(Old, Replacement, Replacements, Log);
+		McpCopySharedProperties(Old, Replacement, Replacements, Log);
 		if (UAnimNotifyState* State = Cast<UAnimNotifyState>(Replacement))
 		{
 			Event.NotifyStateClass = State;
@@ -199,7 +201,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceNotifyClasses(const TShar
 	}
 	Asset->RefreshCacheData();
 	Asset->PostEditChange();
-	SaveAsset(Asset);
+	McpSaveAsset(Asset);
 
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
@@ -210,10 +212,10 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceNotifyClasses(const TShar
 
 TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::DescribeNotifies(const TSharedPtr<FJsonObject>& Params)
 {
-	UAnimSequenceBase* Asset = LoadAssetByPath<UAnimSequenceBase>(Params->GetStringField(TEXT("asset")));
+	UAnimSequenceBase* Asset = McpLoadAssetByPath<UAnimSequenceBase>(Params->GetStringField(TEXT("asset")));
 	if (!Asset)
 	{
-		return AnimError(TEXT("Animation not found"));
+		return McpAnimError(TEXT("Animation not found"));
 	}
 	TArray<TSharedPtr<FJsonValue>> Out;
 	for (const FAnimNotifyEvent& Event : Asset->Notifies)
@@ -234,7 +236,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::DescribeNotifies(const TSharedPt
 				{
 					continue;
 				}
-				Props->SetStringField(It->GetName(), ExportProperty(*It, Object, Object));
+				Props->SetStringField(It->GetName(), McpExportProperty(*It, Object, Object));
 			}
 			Entry->SetObjectField(TEXT("properties"), Props);
 		}
