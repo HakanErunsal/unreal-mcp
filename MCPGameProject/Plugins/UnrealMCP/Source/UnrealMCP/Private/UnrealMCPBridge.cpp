@@ -60,6 +60,7 @@
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "Commands/UnrealMCPUMGCommands.h"
 #include "Commands/UnrealMCPGraphBuilder.h"
+#include "Commands/UnrealMCPAnimCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -287,6 +288,11 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             {
                 static FUnrealMCPGraphBuilder GraphBuilder;
                 ResultJson = GraphBuilder.HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("replace_skeleton") || CommandType == TEXT("replace_notify_classes") || CommandType == TEXT("describe_notifies"))
+            {
+                static FUnrealMCPAnimCommands AnimCommands;
+                ResultJson = AnimCommands.HandleCommand(CommandType, Params);
             }
             else if (CommandType == TEXT("execute_python"))
             {
