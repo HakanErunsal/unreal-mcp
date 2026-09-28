@@ -564,7 +564,17 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 
 	if (!bIsFunction)
 	{
-		Graph = GraphName == TEXT("EventGraph") ? FBlueprintEditorUtils::FindEventGraph(BP) : nullptr;
+		// "graph_path" names a nested graph directly, such as an animation transition rule, which shares its name with every other rule.
+		FString GraphPath;
+		if (Params->TryGetStringField(TEXT("graph_path"), GraphPath))
+		{
+			Graph = LoadObject<UEdGraph>(nullptr, *GraphPath);
+			if (!Graph) return GraphError(FString::Printf(TEXT("Graph not found at path: %s"), *GraphPath));
+		}
+		if (!Graph)
+		{
+			Graph = GraphName == TEXT("EventGraph") ? FBlueprintEditorUtils::FindEventGraph(BP) : nullptr;
+		}
 		if (!Graph)
 		{
 			for (UEdGraph* G : BP->UbergraphPages) if (G && G->GetName() == GraphName) Graph = G;
@@ -572,6 +582,14 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 		if (!Graph)
 		{
 			for (UEdGraph* G : BP->FunctionGraphs) if (G && G->GetName() == GraphName) Graph = G;
+		}
+		if (!Graph)
+		{
+			// An interface function the Blueprint implements lives on its interface description, not in FunctionGraphs.
+			for (FBPInterfaceDescription& Interface : BP->ImplementedInterfaces)
+			{
+				for (UEdGraph* G : Interface.Graphs) if (G && G->GetName() == GraphName) Graph = G;
+			}
 		}
 		if (!Graph) return GraphError(FString::Printf(TEXT("Graph not found: %s"), *GraphName));
 		if (bClear)
