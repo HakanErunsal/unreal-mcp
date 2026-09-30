@@ -14,6 +14,8 @@
 #include "Engine/BlueprintGeneratedClass.h"
 #include "BlueprintFunctionNodeSpawner.h"
 #include "K2Node_AddDelegate.h"
+#include "K2Node_RemoveDelegate.h"
+#include "BlueprintActionDatabase.h"
 #include "K2Node_AsyncAction.h"
 #include "K2Node_EnhancedInputAction.h"
 #include "K2Node_GetSubsystem.h"
@@ -866,6 +868,31 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 				Creator.Finalize();
 				Node = N;
 			}
+			else if (Type == TEXT("palette"))
+			{
+				// A factory function the palette offers under a node class of its own (an ability task, a gameplay task), placed through the palette's own spawner so the node class sets itself up.
+				UFunction* Func = ResolveFunction(BP, Def->GetStringField(TEXT("function")), Err);
+				if (!Func) { Errors.Add(Id + TEXT(": ") + Err); continue; }
+				FString NodeClassName;
+				Def->TryGetStringField(TEXT("node_class"), NodeClassName);
+				UBlueprintNodeSpawner* Found = nullptr;
+				for (const auto& Pair : FBlueprintActionDatabase::Get().GetAllActions())
+				{
+					for (UBlueprintNodeSpawner* Spawner : Pair.Value)
+					{
+						const UBlueprintFunctionNodeSpawner* FuncSpawner = Cast<UBlueprintFunctionNodeSpawner>(Spawner);
+						if (FuncSpawner && FuncSpawner->GetFunction() == Func && Spawner->NodeClass && (NodeClassName.IsEmpty() ? !Spawner->NodeClass->IsChildOf(UK2Node_CallFunction::StaticClass()) : Spawner->NodeClass->GetName() == NodeClassName))
+						{
+							Found = Spawner;
+							break;
+						}
+					}
+					if (Found) break;
+				}
+				if (!Found) { Errors.Add(FString::Printf(TEXT("%s: no palette entry for %s"), *Id, *Func->GetName())); continue; }
+				Node = Found->Invoke(Graph, IBlueprintNodeBinder::FBindingSet(), FVector2D(X, Y));
+				if (!Node) { Errors.Add(FString::Printf(TEXT("%s: could not spawn %s"), *Id, *Func->GetName())); continue; }
+			}
 			else if (Type == TEXT("get_var") || Type == TEXT("set_var"))
 			{
 				const FName Var(*Def->GetStringField(TEXT("var")));
@@ -994,9 +1021,23 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 				Creator.Finalize();
 				Node = N;
 			}
-			else if (Type == TEXT("bind") || Type == TEXT("create_delegate"))
+			else if (Type == TEXT("bind") || Type == TEXT("unbind") || Type == TEXT("create_delegate"))
 			{
-				if (Type == TEXT("bind"))
+				if (Type == TEXT("unbind"))
+				{
+					FString ClassName, DelegateName;
+					Def->GetStringField(TEXT("delegate")).Split(TEXT(":"), &ClassName, &DelegateName, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+					UClass* Class = ClassName.Equals(TEXT("self"), ESearchCase::IgnoreCase) ? SelfClass : ResolveClass(ClassName);
+					FMulticastDelegateProperty* Delegate = Class ? FindFProperty<FMulticastDelegateProperty>(Class, *DelegateName) : nullptr;
+					if (!Delegate) { Errors.Add(FString::Printf(TEXT("%s: delegate not found"), *Id)); continue; }
+					FGraphNodeCreator<UK2Node_RemoveDelegate> Creator(*Graph);
+					UK2Node_RemoveDelegate* N = Creator.CreateNode(false);
+					N->SetFromProperty(Delegate, Class == SelfClass, Class);
+					Place(N);
+					Creator.Finalize();
+					Node = N;
+				}
+				else if (Type == TEXT("bind"))
 				{
 					// "Class:Delegate"; the target pin takes the object that owns the delegate.
 					FString ClassName, DelegateName;
