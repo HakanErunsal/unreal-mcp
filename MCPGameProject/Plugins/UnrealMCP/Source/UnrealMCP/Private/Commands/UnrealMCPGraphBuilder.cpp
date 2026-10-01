@@ -37,6 +37,8 @@
 #include "K2Node_MakeStruct.h"
 #include "K2Node_Select.h"
 #include "K2Node_Self.h"
+#include "K2Node_SpawnActorFromClass.h"
+#include "K2Node_SwitchName.h"
 #include "K2Node_SwitchEnum.h"
 #include "K2Node_VariableGet.h"
 #include "K2Node_VariableSet.h"
@@ -534,6 +536,42 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::AddVariables(const TSharedPtr<FJ
 					FBlueprintEditorUtils::SetBlueprintVariableMetaData(BP, Name, nullptr, FName(*KV.Key), KV.Value->AsString());
 				}
 			}
+			// "replication": "none" | "replicated" | "rep_notify", applied the way the variable details panel does (FBlueprintVarActionDetails::OnChangeReplication), including the OnRep_ function graph.
+			FString Replication;
+			if (Def->TryGetStringField(TEXT("replication"), Replication))
+			{
+				uint64* Flags = FBlueprintEditorUtils::GetBlueprintVariablePropertyFlags(BP, Name);
+				if (!Flags)
+				{
+					Errors.Add(MakeShared<FJsonValueString>(Name.ToString() + TEXT(": no property flags")));
+					continue;
+				}
+				FName RepNotifyFunc = NAME_None;
+				if (Replication.Equals(TEXT("none"), ESearchCase::IgnoreCase))
+				{
+					*Flags &= ~(CPF_Net | CPF_RepNotify);
+				}
+				else
+				{
+					*Flags |= CPF_Net;
+					if (Replication.Equals(TEXT("rep_notify"), ESearchCase::IgnoreCase))
+					{
+						RepNotifyFunc = FName(*FString::Printf(TEXT("OnRep_%s"), *Name.ToString()));
+						if (!FindObject<UEdGraph>(BP, *RepNotifyFunc.ToString()))
+						{
+							UEdGraph* FuncGraph = FBlueprintEditorUtils::CreateNewGraph(BP, RepNotifyFunc, UEdGraph::StaticClass(), UEdGraphSchema_K2::StaticClass());
+							FBlueprintEditorUtils::AddFunctionGraph<UClass>(BP, FuncGraph, false, nullptr);
+						}
+						*Flags |= CPF_RepNotify;
+					}
+					else
+					{
+						*Flags &= ~CPF_RepNotify;
+					}
+				}
+				FBlueprintEditorUtils::SetBlueprintVariableRepNotifyFunc(BP, Name, RepNotifyFunc);
+				FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+			}
 		}
 	}
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -946,6 +984,39 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 				Creator.Finalize();
 				bool bPure = false;
 				if (Def->TryGetBoolField(TEXT("pure"), bPure) && bPure) N->SetPurity(true);
+				Node = N;
+			}
+			else if (Type == TEXT("switch_name"))
+			{
+				// "cases": one exec output per name, plus Default.
+				FGraphNodeCreator<UK2Node_SwitchName> Creator(*Graph);
+				UK2Node_SwitchName* N = Creator.CreateNode(false);
+				const TArray<TSharedPtr<FJsonValue>>* Cases = nullptr;
+				if (Def->TryGetArrayField(TEXT("cases"), Cases))
+				{
+					for (const TSharedPtr<FJsonValue>& Case : *Cases) N->PinNames.Add(FName(*Case->AsString()));
+				}
+				Place(N);
+				Creator.Finalize();
+				Node = N;
+			}
+			else if (Type == TEXT("spawn_actor"))
+			{
+				// Spawn Actor from Class with its class pin set, so the class's Expose on Spawn variables appear as pins.
+				UClass* ActorClass = ResolveClass(Def->GetStringField(TEXT("class")));
+				if (!ActorClass) { Errors.Add(FString::Printf(TEXT("%s: spawn class not found"), *Id)); continue; }
+				FGraphNodeCreator<UK2Node_SpawnActorFromClass> Creator(*Graph);
+				UK2Node_SpawnActorFromClass* N = Creator.CreateNode(false);
+				Place(N);
+				// PostPlacedNewNode reads the scale-method pin (K2Node_SpawnActorFromClass.cpp, GetScaleMethodPin checks it exists), so the pins have to exist before Finalize places the node.
+				N->AllocateDefaultPins();
+				Creator.Finalize();
+				if (UEdGraphPin* ClassPin = N->GetClassPin())
+				{
+					ClassPin->DefaultObject = ActorClass;
+					N->PinDefaultValueChanged(ClassPin);
+				}
+				N->ReconstructNode();
 				Node = N;
 			}
 			else if (Type == TEXT("self"))

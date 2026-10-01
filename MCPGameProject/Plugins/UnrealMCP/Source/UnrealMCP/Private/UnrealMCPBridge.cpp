@@ -62,6 +62,9 @@
 #include "Commands/UnrealMCPGraphBuilder.h"
 #include "Commands/UnrealMCPAnimCommands.h"
 #include "Commands/UnrealMCPAssetCommands.h"
+#include "Commands/UnrealMCPChaosCommands.h"
+#include "Containers/Ticker.h"
+#include "Commands/UnrealMCPNiagaraCommands.h"
 
 // Default settings
 #define MCP_SERVER_HOST "127.0.0.1"
@@ -214,8 +217,8 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
     TPromise<FString> Promise;
     TFuture<FString> Future = Promise.GetFuture();
     
-    // Queue execution on Game Thread
-    AsyncTask(ENamedThreads::GameThread, [this, CommandType, Params, Promise = MoveTemp(Promise)]() mutable
+    // Runs on the game thread from the core ticker rather than as a task-graph task: a task runs inside the frame's task processing (FFrameEndSync::Sync, the world tick), where a synchronous Interchange import trips the named-thread recursion guard and a Blueprint compile that reinstances placed actors destroys components whose tick is already queued.
+    TSharedRef<TUniqueFunction<void()>> Work = MakeShared<TUniqueFunction<void()>>([this, CommandType, Params, Promise = MoveTemp(Promise)]() mutable
     {
         TSharedPtr<FJsonObject> ResponseJson = MakeShareable(new FJsonObject);
         
@@ -303,6 +306,16 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
                 static FUnrealMCPAssetCommands AssetCommands;
                 ResultJson = AssetCommands.HandleCommand(CommandType, Params);
             }
+            else if (CommandType == TEXT("fracture_static_mesh"))
+            {
+                static FUnrealMCPChaosCommands ChaosCommands;
+                ResultJson = ChaosCommands.HandleCommand(CommandType, Params);
+            }
+            else if (CommandType == TEXT("niagara_add_emitter") || CommandType == TEXT("niagara_describe") || CommandType == TEXT("niagara_edit"))
+            {
+                static FUnrealMCPNiagaraCommands NiagaraCommands;
+                ResultJson = NiagaraCommands.HandleCommand(CommandType, Params);
+            }
             else if (CommandType == TEXT("execute_python"))
             {
                 ResultJson = ExecutePython(Params);
@@ -356,6 +369,11 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
         FJsonSerializer::Serialize(ResponseJson.ToSharedRef(), Writer);
         Promise.SetValue(ResultString);
     });
+    FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda([Work](float)
+    {
+        (*Work)();
+        return false;
+    }));
     
     return Future.Get();
 }

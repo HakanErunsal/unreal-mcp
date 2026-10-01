@@ -58,7 +58,14 @@ public class UnrealMCP : ModuleRules
 				"Projects",
 				"AssetRegistry",
 				"EnhancedInput",
-				"InputBlueprintNodes"
+				"InputBlueprintNodes",
+				"Chaos",
+				"GeometryCollectionEngine",
+				"GeometryCore",
+				"PlanarCut",
+				"Niagara",
+				"NiagaraCore",
+				"NiagaraEditor"
 			}
 		);
 		
