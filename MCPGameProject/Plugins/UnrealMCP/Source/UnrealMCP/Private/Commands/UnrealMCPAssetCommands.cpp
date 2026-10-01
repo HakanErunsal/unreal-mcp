@@ -12,6 +12,11 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Serialization/ArchiveReplaceObjectRef.h"
+#include "Sound/SoundCue.h"
+#include "Sound/SoundNodeModulator.h"
+#include "Sound/SoundNodeRandom.h"
+#include "Sound/SoundNodeWavePlayer.h"
+#include "Sound/SoundWave.h"
 #include "UObject/ObjectRedirector.h"
 #include "UObject/Package.h"
 #include "UObject/UObjectHash.h"
@@ -311,8 +316,141 @@ namespace UnrealMCPAssetPrivate
 
 using namespace UnrealMCPAssetPrivate;
 
+namespace UnrealMCPAssetPrivate
+{
+	// soundcue_build {cue, waves[], volume[min,max], pitch[min,max], no_repeat}: replaces the cue's graph with Wave Players into a Random (when there are several) into a Modulator into the output.
+	TSharedPtr<FJsonObject> McpBuildSoundCue(const TSharedPtr<FJsonObject>& Params)
+	{
+		FString CuePath;
+		if (!Params->TryGetStringField(TEXT("cue"), CuePath))
+		{
+			return McpAssetError(TEXT("cue is required"));
+		}
+		USoundCue* Cue = Cast<USoundCue>(McpLoadAnyObject(CuePath));
+		if (!Cue)
+		{
+			return McpAssetError(FString::Printf(TEXT("Not a sound cue: %s"), *CuePath));
+		}
+		const TArray<TSharedPtr<FJsonValue>>* WaveValues = nullptr;
+		if (!Params->TryGetArrayField(TEXT("waves"), WaveValues) || WaveValues->Num() == 0)
+		{
+			return McpAssetError(TEXT("waves needs at least one sound wave path"));
+		}
+		TArray<USoundWave*> Waves;
+		for (const TSharedPtr<FJsonValue>& Value : *WaveValues)
+		{
+			USoundWave* Wave = Cast<USoundWave>(McpLoadAnyObject(Value->AsString()));
+			if (!Wave)
+			{
+				return McpAssetError(FString::Printf(TEXT("Not a sound wave: %s"), *Value->AsString()));
+			}
+			Waves.Add(Wave);
+		}
+		auto ReadRange = [&Params](const TCHAR* Field, float& OutMin, float& OutMax)
+		{
+			const TArray<TSharedPtr<FJsonValue>>* Range = nullptr;
+			if (Params->TryGetArrayField(Field, Range) && Range->Num() == 2)
+			{
+				OutMin = static_cast<float>((*Range)[0]->AsNumber());
+				OutMax = static_cast<float>((*Range)[1]->AsNumber());
+			}
+		};
+		float VolumeMin = 1.f, VolumeMax = 1.f, PitchMin = 1.f, PitchMax = 1.f;
+		ReadRange(TEXT("volume"), VolumeMin, VolumeMax);
+		ReadRange(TEXT("pitch"), PitchMin, PitchMax);
+		bool bNoRepeat = true;
+		Params->TryGetBoolField(TEXT("no_repeat"), bNoRepeat);
+
+		Cue->Modify();
+		Cue->CreateGraph();
+		Cue->ResetGraph();
+
+		// A graph node allocates one input pin per child when it is set up, and linking asserts that the counts match, so each node gets its children before its graph node.
+		auto MakeNode = [Cue](UClass* Class, TArray<USoundNode*> Children)
+		{
+			USoundNode* Node = NewObject<USoundNode>(Cue, Class, NAME_None, RF_Transactional);
+			if (Children.Num() > 0)
+			{
+				Node->SetChildNodes(Children);
+			}
+			Cue->AllNodes.Add(Node);
+			Cue->SetupSoundNode(Node, false);
+			return Node;
+		};
+
+		TArray<USoundNode*> Players;
+		for (USoundWave* Wave : Waves)
+		{
+			USoundNodeWavePlayer* Player = Cast<USoundNodeWavePlayer>(MakeNode(USoundNodeWavePlayer::StaticClass(), {}));
+			Player->SetSoundWave(Wave);
+			Players.Add(Player);
+		}
+
+		USoundNode* Input = Players[0];
+		USoundNodeRandom* Random = nullptr;
+		if (Players.Num() > 1)
+		{
+			Random = Cast<USoundNodeRandom>(MakeNode(USoundNodeRandom::StaticClass(), Players));
+			Random->bRandomizeWithoutReplacement = bNoRepeat;
+			Input = Random;
+		}
+		USoundNodeModulator* Modulator = Cast<USoundNodeModulator>(MakeNode(USoundNodeModulator::StaticClass(), { Input }));
+		Modulator->VolumeMin = VolumeMin;
+		Modulator->VolumeMax = VolumeMax;
+		Modulator->PitchMin = PitchMin;
+		Modulator->PitchMax = PitchMax;
+		Cue->FirstNode = Modulator;
+		Cue->LinkGraphNodesFromSoundNodes();
+
+		Modulator->GraphNode->NodePosX = -260;
+		Modulator->GraphNode->NodePosY = 0;
+		if (Random)
+		{
+			Random->GraphNode->NodePosX = -560;
+			Random->GraphNode->NodePosY = 0;
+		}
+		for (int32 Index = 0; Index < Players.Num(); ++Index)
+		{
+			Players[Index]->GraphNode->NodePosX = Random ? -960 : -660;
+			Players[Index]->GraphNode->NodePosY = (Index - (Players.Num() - 1) * 0.5f) * 130;
+		}
+
+		// Nodes the graph no longer holds stay inside the package and would be saved with it, keeping their sounds referenced, so they move out.
+		TArray<UObject*> Inner;
+		GetObjectsWithOuter(Cue, Inner, true);
+		int32 Removed = 0;
+		for (UObject* Object : Inner)
+		{
+			const bool bStaleSoundNode = Object->IsA<USoundNode>() && !Cue->AllNodes.Contains(Cast<USoundNode>(Object));
+			const bool bStaleGraphNode = Object->IsA<UEdGraphNode>() && Cue->SoundCueGraph && !Cue->SoundCueGraph->Nodes.Contains(Cast<UEdGraphNode>(Object));
+			if (bStaleSoundNode || bStaleGraphNode)
+			{
+				if (USoundNodeWavePlayer* OldPlayer = Cast<USoundNodeWavePlayer>(Object))
+				{
+					OldPlayer->SetSoundWave(nullptr);
+				}
+				Object->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_NonTransactional | REN_DoNotDirty);
+				Object->MarkAsGarbage();
+				++Removed;
+			}
+		}
+
+		Cue->CacheAggregateValues();
+		Cue->PostEditChange();
+		McpSaveOwningAsset(Cue);
+
+		TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("success"), true);
+		Result->SetStringField(TEXT("cue"), Cue->GetPathName());
+		Result->SetNumberField(TEXT("waves"), Players.Num());
+		Result->SetNumberField(TEXT("removed_nodes"), Removed);
+		return Result;
+	}
+}
+
 TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCommand(const FString& CommandType, const TSharedPtr<FJsonObject>& Params)
 {
+	if (CommandType == TEXT("soundcue_build")) return McpBuildSoundCue(Params);
 	if (CommandType == TEXT("replace_object_references")) return ReplaceObjectReferences(Params);
 	if (CommandType == TEXT("create_subobject")) return CreateSubobject(Params);
 	if (CommandType == TEXT("export_properties")) return ExportProperties(Params);

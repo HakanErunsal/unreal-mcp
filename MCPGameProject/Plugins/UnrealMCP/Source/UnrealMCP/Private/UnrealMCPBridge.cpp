@@ -301,7 +301,8 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             else if (CommandType == TEXT("replace_object_references") || CommandType == TEXT("create_subobject") || CommandType == TEXT("export_properties") ||
                      CommandType == TEXT("edgraph_describe") || CommandType == TEXT("edgraph_add_node") || CommandType == TEXT("edgraph_connect") || CommandType == TEXT("edgraph_remove_node") ||
                      CommandType == TEXT("blueprint_retarget") ||
-                     CommandType == TEXT("fixup_redirectors") || CommandType == TEXT("list_objects") || CommandType == TEXT("rename_object"))
+                     CommandType == TEXT("fixup_redirectors") || CommandType == TEXT("list_objects") || CommandType == TEXT("rename_object") ||
+                     CommandType == TEXT("soundcue_build"))
             {
                 static FUnrealMCPAssetCommands AssetCommands;
                 ResultJson = AssetCommands.HandleCommand(CommandType, Params);
