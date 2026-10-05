@@ -1210,7 +1210,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 	TArray<TPair<FString, FString>> PendingDefaults;
 	if (DefaultsObj)
 	{
-		for (const auto& KV : (*DefaultsObj)->Values) PendingDefaults.Add({KV.Key, KV.Value->AsString()});
+		for (const auto& KV : (*DefaultsObj)->Values) PendingDefaults.Add({FString(*KV.Key), KV.Value->AsString()});
 	}
 	// Class and object defaults can reshape a node (a class pin retypes its outputs), so they apply before links.
 	auto ApplyDefaults = [&](bool bFinal)
@@ -1376,7 +1376,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildBehaviorTree(const TSharedP
 		for (const auto& KV : (*Props)->Values)
 		{
 			FString PropErr;
-			if (!SetPropertyByPath(Instance, KV.Key, KV.Value->AsString(), PropErr)) Errors.Add(PropErr);
+			if (!SetPropertyByPath(Instance, FString(*KV.Key), KV.Value->AsString(), PropErr)) Errors.Add(PropErr);
 		}
 	};
 
@@ -1540,7 +1540,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::SetProperties(const TSharedPtr<F
 		for (const auto& KV : (*Values)->Values)
 		{
 			FString Err;
-			if (!SetPropertyByPath(Object, KV.Key, KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Err));
+			if (!SetPropertyByPath(Object, FString(*KV.Key), KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Err));
 		}
 	}
 	Object->PostEditChange();
@@ -1599,7 +1599,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildWidget(const TSharedPtr<FJs
 			for (const auto& KV : (*Props)->Values)
 			{
 				FString Err;
-				if (!SetPropertyByPath(Widget, KV.Key, KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(": ") + Err));
+				if (!SetPropertyByPath(Widget, FString(*KV.Key), KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(": ") + Err));
 			}
 		}
 
@@ -1612,7 +1612,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildWidget(const TSharedPtr<FJs
 				for (const auto& KV : (*SlotProps)->Values)
 				{
 					FString Err;
-					if (!SetPropertyByPath(Slot, KV.Key, KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(" slot: ") + Err));
+					if (!SetPropertyByPath(Slot, FString(*KV.Key), KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(" slot: ") + Err));
 				}
 			}
 		}

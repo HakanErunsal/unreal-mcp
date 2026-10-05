@@ -207,7 +207,7 @@ namespace UnrealMCPAssetPrivate
 		}
 		for (const auto& Pair : (*MapObject)->Values)
 		{
-			UObject* From = McpLoadAnyObject(Pair.Key);
+			UObject* From = McpLoadAnyObject(FString(*Pair.Key));
 			UObject* To = McpLoadAnyObject(Pair.Value->AsString());
 			if (!From || !To)
 			{

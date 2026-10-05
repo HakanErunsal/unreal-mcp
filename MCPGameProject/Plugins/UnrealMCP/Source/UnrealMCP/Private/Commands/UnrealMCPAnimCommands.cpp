@@ -142,7 +142,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAnimCommands::ReplaceNotifyClasses(const TShar
 	{
 		for (const auto& Pair : (*MapObject)->Values)
 		{
-			UClass* From = McpLoadClassByPath(Pair.Key);
+			UClass* From = McpLoadClassByPath(FString(*Pair.Key));
 			UClass* To = McpLoadClassByPath(Pair.Value->AsString());
 			if (!From || !To)
 			{
