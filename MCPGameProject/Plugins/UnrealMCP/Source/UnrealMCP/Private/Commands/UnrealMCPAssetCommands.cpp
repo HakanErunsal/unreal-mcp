@@ -462,6 +462,7 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::HandleCommand(const FString& Co
 	if (CommandType == TEXT("fixup_redirectors")) return FixupRedirectors(Params);
 	if (CommandType == TEXT("list_objects")) return ListObjects(Params);
 	if (CommandType == TEXT("rename_object")) return RenameObject(Params);
+	if (CommandType == TEXT("rename_member_variable")) return RenameMemberVariable(Params);
 	return McpAssetError(FString::Printf(TEXT("Unknown asset command: %s"), *CommandType));
 }
 
@@ -882,5 +883,55 @@ TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::RenameObject(const TSharedPtr<F
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), true);
 	Result->SetStringField(TEXT("path"), Object->GetPathName());
+	return Result;
+}
+
+TSharedPtr<FJsonObject> FUnrealMCPAssetCommands::RenameMemberVariable(const TSharedPtr<FJsonObject>& Params)
+{
+	UBlueprint* Blueprint = Cast<UBlueprint>(McpLoadAnyObject(Params->GetStringField(TEXT("blueprint"))));
+	const FName OldName(*Params->GetStringField(TEXT("old_name")));
+	const FName NewName(*Params->GetStringField(TEXT("new_name")));
+	if (!Blueprint || OldName.IsNone() || NewName.IsNone())
+	{
+		return McpAssetError(TEXT("Blueprint not found, or old_name or new_name empty"));
+	}
+	if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, OldName) == INDEX_NONE)
+	{
+		return McpAssetError(FString::Printf(TEXT("%s has no member variable named %s"), *Blueprint->GetName(), *OldName.ToString()));
+	}
+	if (FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, NewName) != INDEX_NONE)
+	{
+		return McpAssetError(FString::Printf(TEXT("%s already has a member variable named %s"), *Blueprint->GetName(), *NewName.ToString()));
+	}
+
+	TArray<UBlueprint*> Dependents;
+	FBlueprintEditorUtils::FindDependentBlueprints(Blueprint, Dependents);
+	TArray<UPackage*> CleanBefore;
+	for (UBlueprint* Dependent : Dependents)
+	{
+		if (!Dependent->GetOutermost()->IsDirty())
+		{
+			CleanBefore.Add(Dependent->GetOutermost());
+		}
+	}
+
+	FBlueprintEditorUtils::RenameMemberVariable(Blueprint, OldName, NewName);
+	FKismetEditorUtilities::CompileBlueprint(Blueprint);
+	McpSaveOwningAsset(Blueprint);
+
+	TArray<TSharedPtr<FJsonValue>> Changed;
+	for (UBlueprint* Dependent : Dependents)
+	{
+		if (CleanBefore.Contains(Dependent->GetOutermost()) && Dependent->GetOutermost()->IsDirty())
+		{
+			FKismetEditorUtilities::CompileBlueprint(Dependent);
+			McpSaveOwningAsset(Dependent);
+			Changed.Add(MakeShared<FJsonValueString>(Dependent->GetPathName()));
+		}
+	}
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), FBlueprintEditorUtils::FindNewVariableIndex(Blueprint, NewName) != INDEX_NONE);
+	Result->SetArrayField(TEXT("dependents_changed"), Changed);
 	return Result;
 }

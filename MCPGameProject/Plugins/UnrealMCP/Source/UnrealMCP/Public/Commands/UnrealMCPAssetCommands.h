@@ -5,7 +5,7 @@
 
 /**
  * Generic asset and graph surgery for any asset type.
- * Commands: replace_object_references, create_subobject, export_properties, edgraph_describe, edgraph_add_node, edgraph_connect, edgraph_remove_node, blueprint_retarget, fixup_redirectors, list_objects, rename_object.
+ * Commands: replace_object_references, create_subobject, export_properties, edgraph_describe, edgraph_add_node, edgraph_connect, edgraph_remove_node, blueprint_retarget, fixup_redirectors, list_objects, rename_object, rename_member_variable.
  */
 class UNREALMCP_API FUnrealMCPAssetCommands
 {
@@ -45,4 +45,7 @@ private:
 
 	/** {object:path, new_name:name}. Renames an object inside its package without leaving a redirector, then saves the package. */
 	TSharedPtr<FJsonObject> RenameObject(const TSharedPtr<FJsonObject>& Params);
+
+	/** {blueprint:path, old_name:name, new_name:name}. Renames a member variable the way the My Blueprint panel does: every reference in the Blueprint, its children and the loaded Blueprints depending on it follows, and the variable keeps its default. Compiles and saves the Blueprint and each dependent it changed, and lists those dependents. Load the dependents first; one not loaded keeps the old name. */
+	TSharedPtr<FJsonObject> RenameMemberVariable(const TSharedPtr<FJsonObject>& Params);
 };
