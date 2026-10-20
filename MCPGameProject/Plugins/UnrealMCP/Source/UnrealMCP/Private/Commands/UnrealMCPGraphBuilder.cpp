@@ -19,6 +19,7 @@
 #include "K2Node_AsyncAction.h"
 #include "K2Node_EnhancedInputAction.h"
 #include "K2Node_GetSubsystem.h"
+#include "Subsystems/LocalPlayerSubsystem.h"
 #include "InputAction.h"
 #include "K2Node_BreakStruct.h"
 #include "K2Node_CallFunction.h"
@@ -892,6 +893,22 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 				Graph->AddNode(N, false, false);
 				N->PostPlacedNewNode();
 				N->AllocateDefaultPins();
+				Node = N;
+			}
+			else if (Type == TEXT("subsystem"))
+			{
+				// A world, game instance or engine subsystem, as the palette's Get node for that class places it.
+				UClass* Subsystem = ResolveClass(Def->GetStringField(TEXT("class")));
+				if (!Subsystem || !Subsystem->IsChildOf(USubsystem::StaticClass()) || Subsystem->IsChildOf(ULocalPlayerSubsystem::StaticClass()))
+				{
+					Errors.Add(Id + TEXT(": not a world, game instance or engine subsystem class; a local player subsystem uses subsystem_from_pc"));
+					continue;
+				}
+				FGraphNodeCreator<UK2Node_GetSubsystem> Creator(*Graph);
+				UK2Node_GetSubsystem* N = Creator.CreateNode(false);
+				N->Initialize(Subsystem);
+				Place(N);
+				Creator.Finalize();
 				Node = N;
 			}
 			else if (Type == TEXT("async"))
