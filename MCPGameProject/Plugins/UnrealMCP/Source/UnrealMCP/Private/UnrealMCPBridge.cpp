@@ -3,6 +3,8 @@
 #include "Sockets.h"
 #include "SocketSubsystem.h"
 #include "HAL/RunnableThread.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "Interfaces/IPv4/IPv4Address.h"
 #include "Interfaces/IPv4/IPv4Endpoint.h"
 #include "Dom/JsonObject.h"
@@ -98,6 +100,8 @@ void UUnrealMCPBridge::Initialize(FSubsystemCollectionBase& Collection)
     ConnectionSocket = nullptr;
     ServerThread = nullptr;
     Port = MCP_SERVER_PORT;
+    // -UnrealMCPPort=N lets a second editor on the machine serve its own port.
+    FParse::Value(FCommandLine::Get(), TEXT("UnrealMCPPort="), Port);
     FIPv4Address::Parse(MCP_SERVER_HOST, ServerAddress);
 
     // Start the server automatically
