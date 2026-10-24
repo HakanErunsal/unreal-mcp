@@ -1028,7 +1028,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 			}
 			else if (Type == TEXT("enum_equal") || Type == TEXT("enum_not_equal"))
 			{
-				// Typed by the enum wired into A; set B through "defaults" by the value's name.
+				// Typed by the enum wired into A; set B through "defaults" by the value's name, which applies after the links.
 				if (Type == TEXT("enum_equal"))
 				{
 					FGraphNodeCreator<UK2Node_EnumEquality> Creator(*Graph);
@@ -1337,6 +1337,8 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 				if (bFinal) Errors.Add(PinErr);
 				continue;
 			}
+			// A wildcard pin takes its type from a link, which drops a value set before it.
+			if (!bFinal && Pin->PinType.PinCategory == UEdGraphSchema_K2::PC_Wildcard) continue;
 			if (!SetDefault(Schema, Pin, PendingDefaults[i].Value)) Errors.Add(FString::Printf(TEXT("%s: could not resolve '%s'"), *PendingDefaults[i].Key, *PendingDefaults[i].Value));
 			Pin->GetOwningNode()->PinDefaultValueChanged(Pin);
 			PendingDefaults.RemoveAt(i);
