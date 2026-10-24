@@ -65,7 +65,9 @@ public class UnrealMCP : ModuleRules
 				"PlanarCut",
 				"Niagara",
 				"NiagaraCore",
-				"NiagaraEditor"
+				"NiagaraEditor",
+				"MovieScene",
+				"MovieSceneTracks"
 			}
 		);
 		

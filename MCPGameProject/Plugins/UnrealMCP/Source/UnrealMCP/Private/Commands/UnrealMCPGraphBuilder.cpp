@@ -1,7 +1,11 @@
 #include "Commands/UnrealMCPGraphBuilder.h"
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "WidgetBlueprint.h"
+#include "Animation/MovieSceneWidgetMaterialTrack.h"
+#include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetTree.h"
+#include "MovieScene.h"
+#include "Sections/MovieSceneParameterSection.h"
 #include "Components/PanelWidget.h"
 #include "Components/PanelSlot.h"
 
@@ -25,6 +29,7 @@
 #include "K2Node_CallFunction.h"
 #include "K2Node_CallParentFunction.h"
 #include "K2Node_ComponentBoundEvent.h"
+#include "K2Node_ConstructObjectFromClass.h"
 #include "K2Node_CreateDelegate.h"
 #include "K2Node_CustomEvent.h"
 #include "K2Node_DynamicCast.h"
@@ -36,6 +41,10 @@
 #include "K2Node_MacroInstance.h"
 #include "K2Node_MakeArray.h"
 #include "K2Node_MakeStruct.h"
+#include "K2Node_Message.h"
+#include "K2Node_FormatText.h"
+#include "K2Node_EnumEquality.h"
+#include "K2Node_EnumInequality.h"
 #include "K2Node_Select.h"
 #include "K2Node_Self.h"
 #include "K2Node_SpawnActorFromClass.h"
@@ -46,6 +55,9 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Kismet2/StructureEditorUtils.h"
+#include "Engine/UserDefinedStruct.h"
+#include "UserDefinedStructure/UserDefinedStructEditorData.h"
 
 #include "AIGraphTypes.h"
 #include "BehaviorTree/BehaviorTree.h"
@@ -150,9 +162,17 @@ namespace UnrealMCPGraph
 		}
 		if (Type.StartsWith(TEXT("map:")))
 		{
-			// map:<key>:<value>, where the key is a single word type (name, int, string, object:<class> is not supported as a key here).
+			// map:<key>:<value>. A key of struct, enum, object or class takes its argument with it (map:struct:GameplayTag:text).
 			FString Rest = Type.Mid(4), KeyType, ValueType;
 			if (!Rest.Split(TEXT(":"), &KeyType, &ValueType)) { OutError = TEXT("map needs map:<key>:<value>"); return false; }
+			const FString KeyHead = KeyType.ToLower();
+			if (KeyHead == TEXT("struct") || KeyHead == TEXT("enum") || KeyHead == TEXT("object") || KeyHead == TEXT("class") || KeyHead == TEXT("softobject") || KeyHead == TEXT("softclass"))
+			{
+				FString KeyArg, AfterKey;
+				if (!ValueType.Split(TEXT(":"), &KeyArg, &AfterKey)) { OutError = TEXT("map needs map:<key type>:<key argument>:<value>"); return false; }
+				KeyType = KeyType + TEXT(":") + KeyArg;
+				ValueType = AfterKey;
+			}
 			FEdGraphPinType ValuePin;
 			if (!ParsePinType(KeyType, Out, OutError) || !ParsePinType(ValueType, ValuePin, OutError)) return false;
 			Out.ContainerType = EPinContainerType::Map;
@@ -476,6 +496,10 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::HandleCommand(const FString& Com
 	if (CommandType == TEXT("list_comments")) return ListComments(Params);
 	if (CommandType == TEXT("describe_widget")) return DescribeWidget(Params);
 	if (CommandType == TEXT("set_comment")) return SetComment(Params);
+	if (CommandType == TEXT("add_widget_animation")) return AddWidgetAnimation(Params);
+	if (CommandType == TEXT("create_interface")) return CreateInterface(Params);
+	if (CommandType == TEXT("implement_interface")) return ImplementInterface(Params);
+	if (CommandType == TEXT("create_struct")) return CreateStruct(Params);
 	return GraphError(FString::Printf(TEXT("Unknown graph command: %s"), *CommandType));
 }
 
@@ -770,7 +794,11 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 			if (Type == TEXT("event"))
 			{
 				UFunction* Func = BP->ParentClass ? BP->ParentClass->FindFunctionByName(*Name) : nullptr;
-				if (!Func) { Errors.Add(FString::Printf(TEXT("%s: no event '%s' on parent"), *Id, *Name)); continue; }
+				for (const FBPInterfaceDescription& Interface : BP->ImplementedInterfaces)
+				{
+					if (!Func && Interface.Interface) Func = Interface.Interface->FindFunctionByName(*Name);
+				}
+				if (!Func) { Errors.Add(FString::Printf(TEXT("%s: no event '%s' on parent or an implemented interface"), *Id, *Name)); continue; }
 				UClass* Owner = Func->GetOwnerClass();
 				if (UK2Node_Event* Existing = FBlueprintEditorUtils::FindOverrideForFunction(BP, Owner, Func->GetFName()))
 				{
@@ -853,6 +881,18 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 					Node = N;
 				}
 				if (!Node) { Errors.Add(FString::Printf(TEXT("%s: could not spawn %s"), *Id, *Func->GetName())); continue; }
+			}
+			else if (Type == TEXT("message"))
+			{
+				// An interface function called on any object, which does nothing when the object does not implement the interface.
+				UFunction* Func = ResolveFunction(BP, Def->GetStringField(TEXT("function")), Err);
+				if (!Func) { Errors.Add(Id + TEXT(": ") + Err); continue; }
+				FGraphNodeCreator<UK2Node_Message> Creator(*Graph);
+				UK2Node_Message* N = Creator.CreateNode(false);
+				N->SetFromFunction(Func);
+				Place(N);
+				Creator.Finalize();
+				Node = N;
 			}
 			else if (Type == TEXT("call_parent"))
 			{
@@ -972,6 +1012,38 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 					Node = N;
 				}
 			}
+			else if (Type == TEXT("format_text"))
+			{
+				// "format": the pattern, whose {Name} arguments become input pins.
+				FGraphNodeCreator<UK2Node_FormatText> Creator(*Graph);
+				UK2Node_FormatText* N = Creator.CreateNode(false);
+				Place(N);
+				Creator.Finalize();
+				if (UEdGraphPin* FormatPin = N->GetFormatPin())
+				{
+					FormatPin->DefaultTextValue = FText::FromString(Def->GetStringField(TEXT("format")));
+					N->PinDefaultValueChanged(FormatPin);
+				}
+				Node = N;
+			}
+			else if (Type == TEXT("enum_equal") || Type == TEXT("enum_not_equal"))
+			{
+				// Typed by the enum wired into A; set B through "defaults" by the value's name.
+				if (Type == TEXT("enum_equal"))
+				{
+					FGraphNodeCreator<UK2Node_EnumEquality> Creator(*Graph);
+					Node = Creator.CreateNode(false);
+					Place(Node);
+					Creator.Finalize();
+				}
+				else
+				{
+					FGraphNodeCreator<UK2Node_EnumInequality> Creator(*Graph);
+					Node = Creator.CreateNode(false);
+					Place(Node);
+					Creator.Finalize();
+				}
+			}
 			else if (Type == TEXT("branch"))
 			{
 				FGraphNodeCreator<UK2Node_IfThenElse> Creator(*Graph);
@@ -1031,6 +1103,30 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 				if (UEdGraphPin* ClassPin = N->GetClassPin())
 				{
 					ClassPin->DefaultObject = ActorClass;
+					N->PinDefaultValueChanged(ClassPin);
+				}
+				N->ReconstructNode();
+				Node = N;
+			}
+			else if (Type == TEXT("construct"))
+			{
+				// A node that makes an object of a class picked on its class pin, by node class name: K2Node_CreateWidget, K2Node_CreateDragDropOperation or K2Node_GenericCreateObject. The class's Expose on Spawn variables appear as pins. Several of these node classes are private to their editor module, so they are made through the exported base.
+				UClass* NodeClass = FindFirstObject<UClass>(*Def->GetStringField(TEXT("node_class")), EFindFirstObjectOptions::NativeFirst);
+				UClass* ObjectClass = ResolveClass(Def->GetStringField(TEXT("class")));
+				if (!NodeClass || !NodeClass->IsChildOf(UK2Node_ConstructObjectFromClass::StaticClass()) || !ObjectClass)
+				{
+					Errors.Add(Id + TEXT(": construct needs a node_class deriving from K2Node_ConstructObjectFromClass and a class"));
+					continue;
+				}
+				UK2Node_ConstructObjectFromClass* N = NewObject<UK2Node_ConstructObjectFromClass>(Graph, NodeClass);
+				N->CreateNewGuid();
+				Place(N);
+				Graph->AddNode(N, false, false);
+				N->AllocateDefaultPins();
+				N->PostPlacedNewNode();
+				if (UEdGraphPin* ClassPin = N->GetClassPin())
+				{
+					ClassPin->DefaultObject = ObjectClass;
 					N->PinDefaultValueChanged(ClassPin);
 				}
 				N->ReconstructNode();
@@ -1779,6 +1875,159 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::SetComment(const TSharedPtr<FJso
 		}
 	}
 	return GraphError(FString::Printf(TEXT("Comment %s not found in %s"), *NodeName, *GraphName));
+}
+
+// Widget animation - {blueprint, name, widget, parameter, seconds = 1, from = 0, to = 1}: one animation driving a scalar parameter of the material on the widget's Brush in a straight line from From to To over Seconds, replacing an animation of that name.
+TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::AddWidgetAnimation(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Path = Params->GetStringField(TEXT("blueprint"));
+	UWidgetBlueprint* WBP = LoadObject<UWidgetBlueprint>(nullptr, *(Path + TEXT(".") + FPackageName::GetShortName(Path)));
+	if (!WBP || !WBP->WidgetTree) return GraphError(FString::Printf(TEXT("Widget Blueprint not found: %s"), *Path));
+	const FName Name(*Params->GetStringField(TEXT("name")));
+	UWidget* Widget = WBP->WidgetTree->FindWidget(FName(*Params->GetStringField(TEXT("widget"))));
+	if (!Widget) return GraphError(TEXT("No widget of that name in the tree"));
+	const FName Parameter(*Params->GetStringField(TEXT("parameter")));
+	double Seconds = 1.0, From = 0.0, To = 1.0;
+	Params->TryGetNumberField(TEXT("seconds"), Seconds);
+	Params->TryGetNumberField(TEXT("from"), From);
+	Params->TryGetNumberField(TEXT("to"), To);
+
+	WBP->Modify();
+	for (int32 Index = WBP->Animations.Num() - 1; Index >= 0; --Index)
+	{
+		if (UWidgetAnimation* Old = WBP->Animations[Index]; Old && Old->GetFName() == Name)
+		{
+			WBP->Animations.RemoveAt(Index);
+			Old->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_DoNotDirty);
+		}
+	}
+
+	// As the Animations tab's new animation sets it up (AnimationTabSummoner.cpp, OnNewAnimationClicked).
+	UWidgetAnimation* Animation = NewObject<UWidgetAnimation>(WBP, Name, RF_Transactional);
+	Animation->SetDisplayLabel(Name.ToString());
+	Animation->MovieScene = NewObject<UMovieScene>(Animation, Name, RF_Transactional);
+	UMovieScene* Scene = Animation->MovieScene;
+	Scene->SetDisplayRate(FFrameRate(20, 1));
+	const FFrameNumber End = (Seconds * Scene->GetTickResolution()).FloorToFrame();
+	Scene->SetPlaybackRange(TRange<FFrameNumber>(FFrameNumber(0), End + 1));
+	Scene->GetEditorData().WorkStart = 0.0;
+	Scene->GetEditorData().WorkEnd = Seconds;
+
+	const FGuid Guid = Scene->AddPossessable(Widget->GetName(), Widget->GetClass());
+	FWidgetAnimationBinding Binding;
+	Binding.AnimationGuid = Guid;
+	Binding.WidgetName = Widget->GetFName();
+	Animation->AnimationBindings.Add(Binding);
+
+	UMovieSceneWidgetMaterialTrack* Track = Scene->AddTrack<UMovieSceneWidgetMaterialTrack>(Guid);
+	Track->SetBrushPropertyNamePath({FName(TEXT("Brush"))});
+	Track->SetDisplayName(FText::FromString(TEXT("Brush")));
+	Track->AddScalarParameterKey(Parameter, FFrameNumber(0), static_cast<float>(From));
+	Track->AddScalarParameterKey(Parameter, End, static_cast<float>(To));
+	for (UMovieSceneSection* Section : Track->GetAllSections())
+	{
+		if (UMovieSceneParameterSection* ParameterSection = Cast<UMovieSceneParameterSection>(Section))
+		{
+			for (FScalarParameterNameAndCurve& Curve : ParameterSection->GetScalarParameterNamesAndCurves())
+			{
+				for (FMovieSceneFloatValue& Key : Curve.ParameterCurve.GetData().GetValues())
+				{
+					Key.InterpMode = RCIM_Linear;
+				}
+			}
+		}
+	}
+
+	WBP->Animations.Add(Animation);
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	return Compile(WBP, Result);
+}
+
+// Blueprint interface - {path}: an empty Blueprint Interface asset, or the existing one; build_graph with "function" adds its functions.
+TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::CreateInterface(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Path = Params->GetStringField(TEXT("path"));
+	const FString Name = FPackageName::GetShortName(Path);
+	UBlueprint* Interface = LoadObject<UBlueprint>(nullptr, *(Path + TEXT(".") + Name));
+	if (!Interface)
+	{
+		UPackage* Package = CreatePackage(*Path);
+		Interface = FKismetEditorUtilities::CreateBlueprint(UInterface::StaticClass(), Package, FName(*Name), BPTYPE_Interface, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass());
+		FAssetRegistryModule::AssetCreated(Interface);
+		Package->MarkPackageDirty();
+	}
+	if (!Interface || Interface->BlueprintType != BPTYPE_Interface) return GraphError(TEXT("Could not create the interface, or an asset that is not one sits at that path"));
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	return Compile(Interface, Result);
+}
+
+// Interface - {blueprint, interface}: the Blueprint implements the interface, as Class Settings' Implemented Interfaces does.
+TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::ImplementInterface(const TSharedPtr<FJsonObject>& Params)
+{
+	FString Err;
+	UBlueprint* BP = LoadBlueprint(Params, Err);
+	if (!BP) return GraphError(Err);
+	UClass* Interface = ResolveClass(Params->GetStringField(TEXT("interface")));
+	if (!Interface || !Interface->IsChildOf(UInterface::StaticClass())) return GraphError(TEXT("Not an interface class"));
+	if (!FBlueprintEditorUtils::ImplementsInterface(BP, true, Interface) && !FBlueprintEditorUtils::ImplementNewInterface(BP, Interface->GetClassPathName()))
+	{
+		return GraphError(TEXT("The Blueprint refused the interface"));
+	}
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), true);
+	return Compile(BP, Result);
+}
+
+// Struct - {path, members:[{name, type, default, tooltip}]}: a Blueprint struct holding these members in this order, replacing any members it had.
+TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::CreateStruct(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Path = Params->GetStringField(TEXT("path"));
+	const FString Name = FPackageName::GetShortName(Path);
+	UUserDefinedStruct* Struct = LoadObject<UUserDefinedStruct>(nullptr, *(Path + TEXT(".") + Name));
+	if (!Struct)
+	{
+		UPackage* Package = CreatePackage(*Path);
+		Struct = FStructureEditorUtils::CreateUserDefinedStruct(Package, FName(*Name), RF_Public | RF_Standalone | RF_Transactional);
+		FAssetRegistryModule::AssetCreated(Struct);
+	}
+	if (!Struct) return GraphError(TEXT("Could not create the struct"));
+
+	TArray<FGuid> Previous;
+	for (const FStructVariableDescription& Var : FStructureEditorUtils::GetVarDesc(Struct)) Previous.Add(Var.VarGuid);
+
+	TArray<TSharedPtr<FJsonValue>> Errors;
+	const TArray<TSharedPtr<FJsonValue>>* Members = nullptr;
+	if (Params->TryGetArrayField(TEXT("members"), Members))
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *Members)
+		{
+			const TSharedPtr<FJsonObject> Def = Value->AsObject();
+			FEdGraphPinType Type;
+			FString Err;
+			if (!ParsePinType(Def->GetStringField(TEXT("type")), Type, Err) || !FStructureEditorUtils::AddVariable(Struct, Type))
+			{
+				Errors.Add(MakeShared<FJsonValueString>(Def->GetStringField(TEXT("name")) + TEXT(": ") + Err));
+				continue;
+			}
+			const FGuid Guid = FStructureEditorUtils::GetVarDesc(Struct).Last().VarGuid;
+			FStructureEditorUtils::RenameVariable(Struct, Guid, Def->GetStringField(TEXT("name")));
+			FString Default, Tooltip;
+			if (Def->TryGetStringField(TEXT("default"), Default)) FStructureEditorUtils::ChangeVariableDefaultValue(Struct, Guid, Default);
+			if (Def->TryGetStringField(TEXT("tooltip"), Tooltip)) FStructureEditorUtils::ChangeVariableTooltip(Struct, Guid, Tooltip);
+		}
+	}
+	for (const FGuid& Guid : Previous) FStructureEditorUtils::RemoveVariable(Struct, Guid);
+	FString Tooltip;
+	if (Params->TryGetStringField(TEXT("tooltip"), Tooltip)) FStructureEditorUtils::ChangeTooltip(Struct, Tooltip);
+	UEditorAssetLibrary::SaveLoadedAsset(Struct, false);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), Errors.Num() == 0);
+	Result->SetArrayField(TEXT("errors"), Errors);
+	return Result;
 }
 
 // Widget tree - {blueprint}: every widget with its class, slot, and the non-default properties that shape its size, as text.

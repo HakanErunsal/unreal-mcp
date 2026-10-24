@@ -24,4 +24,8 @@ private:
 	TSharedPtr<FJsonObject> ListComments(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> DescribeWidget(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> SetComment(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> AddWidgetAnimation(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> CreateInterface(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> ImplementInterface(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> CreateStruct(const TSharedPtr<FJsonObject>& Params);
 };
