@@ -56,6 +56,8 @@
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Kismet2/StructureEditorUtils.h"
+#include "Kismet2/EnumEditorUtils.h"
+#include "Engine/UserDefinedEnum.h"
 #include "Engine/UserDefinedStruct.h"
 #include "UserDefinedStructure/UserDefinedStructEditorData.h"
 
@@ -465,6 +467,68 @@ namespace UnrealMCPGraph
 		return Result;
 	}
 
+	void ApplySlotSpec(UPanelSlot* Slot, const TSharedPtr<FJsonObject>& Spec, TArray<TSharedPtr<FJsonValue>>& Errors)
+	{
+		const TSharedPtr<FJsonObject>* SlotProps = nullptr;
+		if (!Slot || !Spec->TryGetObjectField(TEXT("slot"), SlotProps)) return;
+		FString Name;
+		Spec->TryGetStringField(TEXT("name"), Name);
+		for (const auto& KV : (*SlotProps)->Values)
+		{
+			FString Err;
+			if (!SetPropertyByPath(Slot, KV.Key, KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(" slot: ") + Err));
+		}
+	}
+
+	/** One widget from a spec {type, name, variable, props, children}, with its children placed in it; the widget itself joins no panel. */
+	UWidget* MakeWidgetFromSpec(UWidgetBlueprint* WBP, const TSharedPtr<FJsonObject>& Spec, TArray<TSharedPtr<FJsonValue>>& Errors)
+	{
+		const FString TypeName = Spec->GetStringField(TEXT("type"));
+		UClass* Class = ResolveClass(TypeName);
+		if (!Class || !Class->IsChildOf(UWidget::StaticClass()))
+		{
+			Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Unknown widget type: %s"), *TypeName)));
+			return nullptr;
+		}
+		FString Name;
+		Spec->TryGetStringField(TEXT("name"), Name);
+		UWidget* Widget = WBP->WidgetTree->ConstructWidget<UWidget>(Class, Name.IsEmpty() ? NAME_None : FName(*Name));
+		bool bVariable = false;
+		Spec->TryGetBoolField(TEXT("variable"), bVariable);
+		Widget->bIsVariable = bVariable;
+
+		const TSharedPtr<FJsonObject>* Props = nullptr;
+		if (Spec->TryGetObjectField(TEXT("props"), Props))
+		{
+			for (const auto& KV : (*Props)->Values)
+			{
+				FString Err;
+				if (!SetPropertyByPath(Widget, KV.Key, KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(": ") + Err));
+			}
+		}
+		WBP->OnVariableAdded(Widget->GetFName());
+
+		const TArray<TSharedPtr<FJsonValue>>* Children = nullptr;
+		if (Spec->TryGetArrayField(TEXT("children"), Children))
+		{
+			UPanelWidget* Panel = Cast<UPanelWidget>(Widget);
+			if (!Panel)
+			{
+				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("%s is not a panel and cannot hold children"), *Name)));
+				return Widget;
+			}
+			for (const TSharedPtr<FJsonValue>& Child : *Children)
+			{
+				const TSharedPtr<FJsonObject> ChildSpec = Child->AsObject();
+				if (UWidget* ChildWidget = MakeWidgetFromSpec(WBP, ChildSpec, Errors))
+				{
+					ApplySlotSpec(Panel->AddChild(ChildWidget), ChildSpec, Errors);
+				}
+			}
+		}
+		return Widget;
+	}
+
 	template <typename T>
 	T* LoadOrCreateAsset(const FString& Path)
 	{
@@ -492,6 +556,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::HandleCommand(const FString& Com
 	if (CommandType == TEXT("describe_graph")) return DescribeGraph(Params);
 	if (CommandType == TEXT("set_properties")) return SetProperties(Params);
 	if (CommandType == TEXT("build_widget")) return BuildWidget(Params);
+	if (CommandType == TEXT("edit_widget")) return EditWidget(Params);
 	if (CommandType == TEXT("recolor_comments")) return RecolorComments(Params);
 	if (CommandType == TEXT("list_comments")) return ListComments(Params);
 	if (CommandType == TEXT("describe_widget")) return DescribeWidget(Params);
@@ -500,6 +565,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::HandleCommand(const FString& Com
 	if (CommandType == TEXT("create_interface")) return CreateInterface(Params);
 	if (CommandType == TEXT("implement_interface")) return ImplementInterface(Params);
 	if (CommandType == TEXT("create_struct")) return CreateStruct(Params);
+	if (CommandType == TEXT("create_enum")) return CreateEnum(Params);
 	return GraphError(FString::Printf(TEXT("Unknown graph command: %s"), *CommandType));
 }
 
@@ -1691,71 +1757,10 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildWidget(const TSharedPtr<FJs
 	WBP->WidgetVariableNameToGuidMap.Empty();
 
 	TArray<TSharedPtr<FJsonValue>> Errors;
-	TFunction<UWidget*(const TSharedPtr<FJsonObject>&, UPanelWidget*)> Build;
-	Build = [&](const TSharedPtr<FJsonObject>& Spec, UPanelWidget* Parent) -> UWidget*
-	{
-		const FString TypeName = Spec->GetStringField(TEXT("type"));
-		UClass* Class = ResolveClass(TypeName);
-		if (!Class || !Class->IsChildOf(UWidget::StaticClass()))
-		{
-			Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("Unknown widget type: %s"), *TypeName)));
-			return nullptr;
-		}
-		FString Name;
-		Spec->TryGetStringField(TEXT("name"), Name);
-		UWidget* Widget = WBP->WidgetTree->ConstructWidget<UWidget>(Class, Name.IsEmpty() ? NAME_None : FName(*Name));
-		bool bVariable = false;
-		Spec->TryGetBoolField(TEXT("variable"), bVariable);
-		Widget->bIsVariable = bVariable;
-
-		const TSharedPtr<FJsonObject>* Props = nullptr;
-		if (Spec->TryGetObjectField(TEXT("props"), Props))
-		{
-			for (const auto& KV : (*Props)->Values)
-			{
-				FString Err;
-				if (!SetPropertyByPath(Widget, KV.Key, KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(": ") + Err));
-			}
-		}
-
-		if (Parent)
-		{
-			UPanelSlot* Slot = Parent->AddChild(Widget);
-			const TSharedPtr<FJsonObject>* SlotProps = nullptr;
-			if (Slot && Spec->TryGetObjectField(TEXT("slot"), SlotProps))
-			{
-				for (const auto& KV : (*SlotProps)->Values)
-				{
-					FString Err;
-					if (!SetPropertyByPath(Slot, KV.Key, KV.Value->AsString(), Err)) Errors.Add(MakeShared<FJsonValueString>(Name + TEXT(" slot: ") + Err));
-				}
-			}
-		}
-		WBP->OnVariableAdded(Widget->GetFName());
-
-		const TArray<TSharedPtr<FJsonValue>>* Children = nullptr;
-		if (Spec->TryGetArrayField(TEXT("children"), Children))
-		{
-			UPanelWidget* Panel = Cast<UPanelWidget>(Widget);
-			if (!Panel)
-			{
-				Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("%s is not a panel and cannot hold children"), *Name)));
-			}
-			else
-			{
-				for (const TSharedPtr<FJsonValue>& Child : *Children)
-				{
-					Build(Child->AsObject(), Panel);
-				}
-			}
-		}
-		return Widget;
-	};
-
 	const TSharedPtr<FJsonObject>* Root = nullptr;
 	if (Params->TryGetObjectField(TEXT("root"), Root))
 	{
-		WBP->WidgetTree->RootWidget = Build(*Root, nullptr);
+		WBP->WidgetTree->RootWidget = MakeWidgetFromSpec(WBP, *Root, Errors);
 	}
 
 	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
@@ -1767,6 +1772,112 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildWidget(const TSharedPtr<FJs
 	Result->SetArrayField(TEXT("errors"), Errors);
 	if (Errors.Num() > 0) Result->SetStringField(TEXT("error"), Errors[0]->AsString());
 	return Result;
+}
+
+// Widget tree edit - {blueprint, ops:[...]}: changes the tree in place and keeps every other widget. {op:"insert", parent, index (-1 appends), spec}; {op:"wrap", target, spec, inner_slot}: the spec's panel takes the target's place and slot, and the target moves into it with inner_slot; {op:"remove", name}: the widget and everything under it.
+TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Path = Params->GetStringField(TEXT("blueprint"));
+	UWidgetBlueprint* WBP = LoadObject<UWidgetBlueprint>(nullptr, *(Path + TEXT(".") + FPackageName::GetShortName(Path)));
+	if (!WBP || !WBP->WidgetTree) return GraphError(FString::Printf(TEXT("Widget Blueprint not found: %s"), *Path));
+
+	WBP->Modify();
+	WBP->WidgetTree->Modify();
+	TArray<TSharedPtr<FJsonValue>> Errors;
+	auto Fail = [&Errors](const FString& Message) { Errors.Add(MakeShared<FJsonValueString>(Message)); };
+
+	const TArray<TSharedPtr<FJsonValue>>* Ops = nullptr;
+	if (Params->TryGetArrayField(TEXT("ops"), Ops))
+	{
+		for (const TSharedPtr<FJsonValue>& Value : *Ops)
+		{
+			const TSharedPtr<FJsonObject> Op = Value->AsObject();
+			const FString Kind = Op->GetStringField(TEXT("op"));
+			const TSharedPtr<FJsonObject>* Spec = nullptr;
+			Op->TryGetObjectField(TEXT("spec"), Spec);
+			if (Kind == TEXT("insert"))
+			{
+				const FString ParentName = Op->GetStringField(TEXT("parent"));
+				UPanelWidget* Parent = Cast<UPanelWidget>(WBP->WidgetTree->FindWidget(FName(*ParentName)));
+				if (!Parent || !Spec)
+				{
+					Fail(FString::Printf(TEXT("insert: %s is no panel in the tree, or the op has no spec"), *ParentName));
+					continue;
+				}
+				UWidget* Widget = MakeWidgetFromSpec(WBP, *Spec, Errors);
+				if (!Widget) continue;
+				int32 Index = -1;
+				Op->TryGetNumberField(TEXT("index"), Index);
+				UPanelSlot* Slot = Index < 0 ? Parent->AddChild(Widget) : Parent->InsertChildAt(Index, Widget);
+				if (!Slot)
+				{
+					Fail(FString::Printf(TEXT("insert: %s holds one child and has it"), *ParentName));
+					continue;
+				}
+				ApplySlotSpec(Slot, *Spec, Errors);
+			}
+			else if (Kind == TEXT("wrap"))
+			{
+				const FString TargetName = Op->GetStringField(TEXT("target"));
+				UWidget* Target = WBP->WidgetTree->FindWidget(FName(*TargetName));
+				UPanelWidget* Wrapper = Target && Spec ? Cast<UPanelWidget>(MakeWidgetFromSpec(WBP, *Spec, Errors)) : nullptr;
+				if (!Wrapper)
+				{
+					Fail(FString::Printf(TEXT("wrap: no widget %s, or the spec makes no panel"), *TargetName));
+					continue;
+				}
+				if (UPanelWidget* OldParent = Target->GetParent())
+				{
+					// ReplaceChildAt leaves Target->Slot on the slot the wrapper now holds; AddChild's RemoveFromParent would remove that slot unless it is cleared first.
+					OldParent->ReplaceChildAt(OldParent->GetChildIndex(Target), Wrapper);
+					Target->Slot = nullptr;
+				}
+				else
+				{
+					WBP->WidgetTree->RootWidget = Wrapper;
+				}
+				UPanelSlot* Inner = Wrapper->AddChild(Target);
+				const TSharedPtr<FJsonObject>* InnerSlot = nullptr;
+				if (Inner && Op->TryGetObjectField(TEXT("inner_slot"), InnerSlot))
+				{
+					for (const auto& KV : (*InnerSlot)->Values)
+					{
+						FString Err;
+						if (!SetPropertyByPath(Inner, KV.Key, KV.Value->AsString(), Err)) Fail(TargetName + TEXT(" slot: ") + Err);
+					}
+				}
+			}
+			else if (Kind == TEXT("remove"))
+			{
+				const FString Name = Op->GetStringField(TEXT("name"));
+				UWidget* Widget = WBP->WidgetTree->FindWidget(FName(*Name));
+				if (!Widget)
+				{
+					Fail(FString::Printf(TEXT("remove: no widget %s"), *Name));
+					continue;
+				}
+				TArray<UWidget*> Removed = {Widget};
+				UWidgetTree::GetChildWidgets(Widget, Removed);
+				WBP->WidgetTree->RemoveWidget(Widget);
+				for (UWidget* Gone : Removed)
+				{
+					WBP->WidgetVariableNameToGuidMap.Remove(Gone->GetFName());
+					Gone->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_DoNotDirty);
+				}
+			}
+			else
+			{
+				Fail(FString::Printf(TEXT("Unknown widget op: %s"), *Kind));
+			}
+		}
+	}
+
+	FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), Errors.Num() == 0);
+	Result->SetArrayField(TEXT("errors"), Errors);
+	if (Errors.Num() > 0) Result->SetStringField(TEXT("error"), Errors[0]->AsString());
+	return Compile(WBP, Result);
 }
 
 // Comment colours - {folder, color:"(R=0,G=0,B=0,A=1)"}: every comment box in every Blueprint under the folder.
@@ -2029,6 +2140,51 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::CreateStruct(const TSharedPtr<FJ
 	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
 	Result->SetBoolField(TEXT("success"), Errors.Num() == 0);
 	Result->SetArrayField(TEXT("errors"), Errors);
+	return Result;
+}
+
+// Enum - {path, values:[{name, tooltip}], tooltip}: a Blueprint enum holding these values in this order, replacing any it had.
+TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::CreateEnum(const TSharedPtr<FJsonObject>& Params)
+{
+	const FString Path = Params->GetStringField(TEXT("path"));
+	const FString Name = FPackageName::GetShortName(Path);
+	UUserDefinedEnum* Enum = LoadObject<UUserDefinedEnum>(nullptr, *(Path + TEXT(".") + Name));
+	if (!Enum)
+	{
+		UPackage* Package = CreatePackage(*Path);
+		Enum = Cast<UUserDefinedEnum>(FEnumEditorUtils::CreateUserDefinedEnum(Package, FName(*Name), RF_Public | RF_Standalone | RF_Transactional));
+		if (Enum) FAssetRegistryModule::AssetCreated(Enum);
+	}
+	if (!Enum) return GraphError(TEXT("Could not create the enum, or an asset that is not one sits at that path"));
+
+	const TArray<TSharedPtr<FJsonValue>>* Values = nullptr;
+	Params->TryGetArrayField(TEXT("values"), Values);
+	const int32 Wanted = Values ? Values->Num() : 0;
+	// NumEnums counts the hidden _MAX entry, and a Blueprint enum keeps at least one value.
+	while (Enum->NumEnums() - 1 < Wanted) FEnumEditorUtils::AddNewEnumeratorForUserDefinedEnum(Enum);
+	while (Enum->NumEnums() - 1 > FMath::Max(Wanted, 1)) FEnumEditorUtils::RemoveEnumeratorFromUserDefinedEnum(Enum, Enum->NumEnums() - 2);
+
+	TArray<TSharedPtr<FJsonValue>> Errors;
+	for (int32 Index = 0; Index < Wanted; ++Index)
+	{
+		const TSharedPtr<FJsonObject> Def = (*Values)[Index]->AsObject();
+		const FString ValueName = Def->GetStringField(TEXT("name"));
+		if (!FEnumEditorUtils::SetEnumeratorDisplayName(Enum, Index, FText::FromString(ValueName)))
+		{
+			Errors.Add(MakeShared<FJsonValueString>(FString::Printf(TEXT("%s: the name is taken or not valid"), *ValueName)));
+		}
+		FString Tooltip;
+		if (Def->TryGetStringField(TEXT("tooltip"), Tooltip)) Enum->SetMetaData(TEXT("ToolTip"), *Tooltip, Index);
+	}
+	FString Tooltip;
+	if (Params->TryGetStringField(TEXT("tooltip"), Tooltip)) Enum->EnumDescription = FText::FromString(Tooltip);
+	Enum->MarkPackageDirty();
+	UEditorAssetLibrary::SaveLoadedAsset(Enum, false);
+
+	TSharedPtr<FJsonObject> Result = MakeShared<FJsonObject>();
+	Result->SetBoolField(TEXT("success"), Errors.Num() == 0);
+	Result->SetArrayField(TEXT("errors"), Errors);
+	if (Errors.Num() > 0) Result->SetStringField(TEXT("error"), Errors[0]->AsString());
 	return Result;
 }
 

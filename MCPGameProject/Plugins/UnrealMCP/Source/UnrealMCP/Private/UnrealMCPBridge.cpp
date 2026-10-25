@@ -292,7 +292,7 @@ FString UUnrealMCPBridge::ExecuteCommand(const FString& CommandType, const TShar
             }
             else if (CommandType == TEXT("add_variables") || CommandType == TEXT("build_graph") ||
                      CommandType == TEXT("build_blackboard") || CommandType == TEXT("build_behavior_tree") ||
-                     CommandType == TEXT("describe_graph") || CommandType == TEXT("set_properties") || CommandType == TEXT("build_widget") || CommandType == TEXT("recolor_comments") || CommandType == TEXT("list_comments") || CommandType == TEXT("describe_widget") || CommandType == TEXT("set_comment") || CommandType == TEXT("add_widget_animation") || CommandType == TEXT("create_interface") || CommandType == TEXT("implement_interface") || CommandType == TEXT("create_struct"))
+                     CommandType == TEXT("describe_graph") || CommandType == TEXT("set_properties") || CommandType == TEXT("build_widget") || CommandType == TEXT("edit_widget") || CommandType == TEXT("recolor_comments") || CommandType == TEXT("list_comments") || CommandType == TEXT("describe_widget") || CommandType == TEXT("set_comment") || CommandType == TEXT("add_widget_animation") || CommandType == TEXT("create_interface") || CommandType == TEXT("implement_interface") || CommandType == TEXT("create_struct") || CommandType == TEXT("create_enum"))
             {
                 static FUnrealMCPGraphBuilder GraphBuilder;
                 ResultJson = GraphBuilder.HandleCommand(CommandType, Params);

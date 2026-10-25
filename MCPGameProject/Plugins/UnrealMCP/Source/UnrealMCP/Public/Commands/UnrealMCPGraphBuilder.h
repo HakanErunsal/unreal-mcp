@@ -20,6 +20,7 @@ private:
 	TSharedPtr<FJsonObject> DescribeGraph(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> SetProperties(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> BuildWidget(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> EditWidget(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> RecolorComments(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> ListComments(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> DescribeWidget(const TSharedPtr<FJsonObject>& Params);
@@ -28,4 +29,5 @@ private:
 	TSharedPtr<FJsonObject> CreateInterface(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> ImplementInterface(const TSharedPtr<FJsonObject>& Params);
 	TSharedPtr<FJsonObject> CreateStruct(const TSharedPtr<FJsonObject>& Params);
+	TSharedPtr<FJsonObject> CreateEnum(const TSharedPtr<FJsonObject>& Params);
 };
