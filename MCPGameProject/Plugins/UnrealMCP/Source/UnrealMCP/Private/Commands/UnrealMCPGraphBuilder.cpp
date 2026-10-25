@@ -1868,7 +1868,6 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJso
 			}
 			else if (Kind == TEXT("delete"))
 			{
-				// The designer's own delete: also removes the graph's variable nodes for the widget and everything under it.
 				const FString Name = Op->GetStringField(TEXT("name"));
 				UWidget* Widget = WBP->WidgetTree->FindWidget(FName(*Name));
 				if (!Widget)
@@ -1880,7 +1879,6 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJso
 			}
 			else if (Kind == TEXT("move"))
 			{
-				// {op:"move", name, parent, index (-1 appends), slot:{}}: the widget leaves its panel and joins another, keeping its name, variable and children.
 				const FString Name = Op->GetStringField(TEXT("name"));
 				const FString ParentName = Op->GetStringField(TEXT("parent"));
 				UWidget* Widget = WBP->WidgetTree->FindWidget(FName(*Name));
@@ -1909,7 +1907,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJso
 			}
 			else if (Kind == TEXT("rename"))
 			{
-				// The designer's own rename (FWidgetBlueprintEditorUtils::RenameWidget without an open editor): graph references, property bindings and animation bindings follow the new name.
+				// Mirrors FWidgetBlueprintEditorUtils::RenameWidget, which needs an open editor.
 				const FName OldName(*Op->GetStringField(TEXT("name")));
 				const FName NewName(*Op->GetStringField(TEXT("new_name")));
 				UWidget* Widget = WBP->WidgetTree->FindWidget(OldName);
