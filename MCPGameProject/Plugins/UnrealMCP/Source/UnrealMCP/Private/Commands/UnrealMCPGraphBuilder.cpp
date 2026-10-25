@@ -1,6 +1,7 @@
 #include "Commands/UnrealMCPGraphBuilder.h"
 #include "Commands/UnrealMCPCommonUtils.h"
 #include "WidgetBlueprint.h"
+#include "WidgetBlueprintEditorUtils.h"
 #include "Animation/MovieSceneWidgetMaterialTrack.h"
 #include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetTree.h"
@@ -1774,7 +1775,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildWidget(const TSharedPtr<FJs
 	return Result;
 }
 
-// Widget tree edit - {blueprint, ops:[...]}: changes the tree in place and keeps every other widget. {op:"insert", parent, index (-1 appends), spec}; {op:"wrap", target, spec, inner_slot}: the spec's panel takes the target's place and slot, and the target moves into it with inner_slot; {op:"remove", name}: the widget and everything under it.
+// Widget tree edit - {blueprint, ops:[...]}: changes the tree in place and keeps every other widget. {op:"insert", parent, index (-1 appends), spec}; {op:"wrap", target, spec, inner_slot}: the spec's panel takes the target's place and slot, and the target moves into it with inner_slot; {op:"remove", name}: the widget and everything under it; {op:"delete", name}: the same as the designer's delete, which also removes the graph's variable nodes for them; {op:"move", name, parent, index, slot}; {op:"rename", name, new_name}: the same as the designer's rename.
 TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJsonObject>& Params)
 {
 	const FString Path = Params->GetStringField(TEXT("blueprint"));
@@ -1864,6 +1865,88 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJso
 					WBP->WidgetVariableNameToGuidMap.Remove(Gone->GetFName());
 					Gone->Rename(nullptr, GetTransientPackage(), REN_DontCreateRedirectors | REN_DoNotDirty);
 				}
+			}
+			else if (Kind == TEXT("delete"))
+			{
+				// The designer's own delete: also removes the graph's variable nodes for the widget and everything under it.
+				const FString Name = Op->GetStringField(TEXT("name"));
+				UWidget* Widget = WBP->WidgetTree->FindWidget(FName(*Name));
+				if (!Widget)
+				{
+					Fail(FString::Printf(TEXT("delete: no widget %s"), *Name));
+					continue;
+				}
+				FWidgetBlueprintEditorUtils::DeleteWidgets(WBP, {Widget}, FWidgetBlueprintEditorUtils::EDeleteWidgetWarningType::DeleteSilently);
+			}
+			else if (Kind == TEXT("move"))
+			{
+				// {op:"move", name, parent, index (-1 appends), slot:{}}: the widget leaves its panel and joins another, keeping its name, variable and children.
+				const FString Name = Op->GetStringField(TEXT("name"));
+				const FString ParentName = Op->GetStringField(TEXT("parent"));
+				UWidget* Widget = WBP->WidgetTree->FindWidget(FName(*Name));
+				UPanelWidget* Parent = Cast<UPanelWidget>(WBP->WidgetTree->FindWidget(FName(*ParentName)));
+				if (!Widget || !Parent || Widget == Parent)
+				{
+					Fail(FString::Printf(TEXT("move: no widget %s or no panel %s"), *Name, *ParentName));
+					continue;
+				}
+				Widget->Modify();
+				Parent->Modify();
+				if (UPanelWidget* OldParent = Widget->GetParent())
+				{
+					OldParent->Modify();
+					OldParent->RemoveChild(Widget);
+				}
+				int32 Index = -1;
+				Op->TryGetNumberField(TEXT("index"), Index);
+				UPanelSlot* Slot = Index < 0 ? Parent->AddChild(Widget) : Parent->InsertChildAt(Index, Widget);
+				if (!Slot)
+				{
+					Fail(FString::Printf(TEXT("move: %s holds one child and has it"), *ParentName));
+					continue;
+				}
+				ApplySlotSpec(Slot, Op, Errors);
+			}
+			else if (Kind == TEXT("rename"))
+			{
+				// The designer's own rename (FWidgetBlueprintEditorUtils::RenameWidget without an open editor): graph references, property bindings and animation bindings follow the new name.
+				const FName OldName(*Op->GetStringField(TEXT("name")));
+				const FName NewName(*Op->GetStringField(TEXT("new_name")));
+				UWidget* Widget = WBP->WidgetTree->FindWidget(OldName);
+				if (!Widget || NewName.IsNone() || WBP->WidgetTree->FindWidget(NewName))
+				{
+					Fail(FString::Printf(TEXT("rename: no widget %s, or %s is taken"), *OldName.ToString(), *NewName.ToString()));
+					continue;
+				}
+				Widget->Modify();
+				Widget->Rename(*NewName.ToString(), nullptr, REN_DontCreateRedirectors);
+				if (const FGuid* Guid = WBP->WidgetVariableNameToGuidMap.Find(OldName))
+				{
+					const FGuid Kept = *Guid;
+					WBP->WidgetVariableNameToGuidMap.Remove(OldName);
+					WBP->WidgetVariableNameToGuidMap.Add(NewName, Kept);
+				}
+				for (FDelegateEditorBinding& Binding : WBP->Bindings)
+				{
+					if (Binding.ObjectName == OldName.ToString()) Binding.ObjectName = NewName.ToString();
+				}
+				for (UWidgetAnimation* Animation : WBP->Animations)
+				{
+					for (FWidgetAnimationBinding& AnimBinding : Animation->AnimationBindings)
+					{
+						if (AnimBinding.WidgetName != OldName) continue;
+						AnimBinding.WidgetName = NewName;
+						Animation->MovieScene->Modify();
+						if (AnimBinding.SlotWidgetName == NAME_None)
+						{
+							if (FMovieScenePossessable* Possessable = Animation->MovieScene->FindPossessable(AnimBinding.AnimationGuid))
+							{
+								Possessable->SetName(NewName.ToString());
+							}
+						}
+					}
+				}
+				FBlueprintEditorUtils::ReplaceVariableReferences(WBP, OldName, NewName);
 			}
 			else
 			{
