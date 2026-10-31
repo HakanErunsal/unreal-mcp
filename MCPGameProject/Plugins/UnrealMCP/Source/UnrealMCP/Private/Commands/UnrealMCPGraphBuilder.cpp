@@ -329,6 +329,10 @@ namespace UnrealMCPGraph
 			FString Err;
 			if (ParsePinType(P->GetStringField(TEXT("type")), Type, Err))
 			{
+				// "ref" and "const" make a const reference parameter, which a prototype such as an anim node function's requires.
+				bool bFlag = false;
+				if (P->TryGetBoolField(TEXT("ref"), bFlag)) Type.bIsReference = bFlag;
+				if (P->TryGetBoolField(TEXT("const"), bFlag)) Type.bIsConst = bFlag;
 				Out.Add({FName(*P->GetStringField(TEXT("name"))), Type});
 			}
 			else
