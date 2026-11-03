@@ -42,6 +42,7 @@
 #include "K2Node_MacroInstance.h"
 #include "K2Node_MakeArray.h"
 #include "K2Node_MakeStruct.h"
+#include "K2Node_SetFieldsInStruct.h"
 #include "K2Node_Message.h"
 #include "K2Node_FormatText.h"
 #include "K2Node_EnumEquality.h"
@@ -1245,6 +1246,27 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildGraph(const TSharedPtr<FJso
 					Creator.Finalize();
 					Node = N;
 				}
+			}
+			else if (Type == TEXT("set_members"))
+			{
+				// Set Members in a struct; "members" names the fields shown as pins, as ticking them in the node's details does.
+				UScriptStruct* Struct = ResolveStruct(Def->GetStringField(TEXT("struct")));
+				if (!Struct) { Errors.Add(FString::Printf(TEXT("%s: struct not found"), *Id)); continue; }
+				FGraphNodeCreator<UK2Node_SetFieldsInStruct> Creator(*Graph);
+				UK2Node_SetFieldsInStruct* N = Creator.CreateNode(false);
+				N->StructType = Struct;
+				Place(N);
+				Creator.Finalize();
+				const TArray<TSharedPtr<FJsonValue>>* Members = nullptr;
+				if (Def->TryGetArrayField(TEXT("members"), Members))
+				{
+					for (FOptionalPinFromProperty& Option : N->ShowPinForProperties)
+					{
+						Option.bShowPin = Members->ContainsByPredicate([&Option](const TSharedPtr<FJsonValue>& Member) { return Member->AsString() == Option.PropertyName.ToString(); });
+					}
+					N->ReconstructNode();
+				}
+				Node = N;
 			}
 			else if (Type == TEXT("make_array"))
 			{
