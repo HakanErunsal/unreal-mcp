@@ -5,6 +5,7 @@
 #include "Animation/MovieSceneWidgetMaterialTrack.h"
 #include "Animation/WidgetAnimation.h"
 #include "Blueprint/WidgetTree.h"
+#include "Blueprint/UserWidget.h"
 #include "MovieScene.h"
 #include "Sections/MovieSceneParameterSection.h"
 #include "Components/PanelWidget.h"
@@ -575,7 +576,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::HandleCommand(const FString& Com
 	return GraphError(FString::Printf(TEXT("Unknown graph command: %s"), *CommandType));
 }
 
-// Variables - {blueprint, variables:[{name, type, default, editable, expose_on_spawn, category, tooltip}]}
+// Variables - {blueprint, remove:[name], variables:[{name, type, default, editable, expose_on_spawn, category, tooltip}]}: removes the named variables first.
 TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::AddVariables(const TSharedPtr<FJsonObject>& Params)
 {
 	FString Err;
@@ -583,6 +584,21 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::AddVariables(const TSharedPtr<FJ
 	if (!BP) return GraphError(Err);
 
 	TArray<TSharedPtr<FJsonValue>> Errors;
+	const TArray<TSharedPtr<FJsonValue>>* Removed = nullptr;
+	if (Params->TryGetArrayField(TEXT("remove"), Removed))
+	{
+		// The same as the variable list's delete: every Get and Set node of the variable goes with it.
+		for (const TSharedPtr<FJsonValue>& V : *Removed)
+		{
+			const FName Name(*V->AsString());
+			if (FBlueprintEditorUtils::FindNewVariableIndex(BP, Name) == INDEX_NONE)
+			{
+				Errors.Add(MakeShared<FJsonValueString>(Name.ToString() + TEXT(": no such variable")));
+				continue;
+			}
+			FBlueprintEditorUtils::RemoveMemberVariable(BP, Name);
+		}
+	}
 	const TArray<TSharedPtr<FJsonValue>>* Vars = nullptr;
 	if (Params->TryGetArrayField(TEXT("variables"), Vars))
 	{
@@ -1907,7 +1923,7 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::BuildWidget(const TSharedPtr<FJs
 	return Result;
 }
 
-// Widget tree edit - {blueprint, ops:[...]}: changes the tree in place and keeps every other widget. {op:"insert", parent, index (-1 appends), spec}; {op:"wrap", target, spec, inner_slot}: the spec's panel takes the target's place and slot, and the target moves into it with inner_slot; {op:"remove", name}: the widget and everything under it; {op:"delete", name}: the same as the designer's delete, which also removes the graph's variable nodes for them; {op:"move", name, parent, index, slot}; {op:"rename", name, new_name}: the same as the designer's rename.
+// Widget tree edit - {blueprint, ops:[...]}: changes the tree in place and keeps every other widget. {op:"insert", parent, index (-1 appends), spec}; {op:"wrap", target, spec, inner_slot}: the spec's panel takes the target's place and slot, and the target moves into it with inner_slot; {op:"remove", name}: the widget and everything under it; {op:"delete", name}: the same as the designer's delete, which also removes the graph's variable nodes for them; {op:"move", name, parent, index, slot}; {op:"rename", name, new_name}: the same as the designer's rename; {op:"slot_content", host, slot, name}: moves a widget into the named slot of a user widget in the tree.
 TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJsonObject>& Params)
 {
 	const FString Path = Params->GetStringField(TEXT("blueprint"));
@@ -2077,6 +2093,30 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::EditWidget(const TSharedPtr<FJso
 					}
 				}
 				FBlueprintEditorUtils::ReplaceVariableReferences(WBP, OldName, NewName);
+			}
+			else if (Kind == TEXT("slot_content"))
+			{
+				// The designer's drop into a child widget's named slot: the content leaves its panel and the host template keeps it in its named slot bindings.
+				const FString HostName = Op->GetStringField(TEXT("host"));
+				const FName SlotName(*Op->GetStringField(TEXT("slot")));
+				const FString Name = Op->GetStringField(TEXT("name"));
+				UUserWidget* Host = Cast<UUserWidget>(WBP->WidgetTree->FindWidget(FName(*HostName)));
+				UWidget* Widget = WBP->WidgetTree->FindWidget(FName(*Name));
+				TArray<FName> SlotNames;
+				if (Host) Host->GetSlotNames(SlotNames);
+				if (!Host || !Widget || Widget == Host || !SlotNames.Contains(SlotName))
+				{
+					Fail(FString::Printf(TEXT("slot_content: no user widget %s with a named slot %s, or no widget %s"), *HostName, *SlotName.ToString(), *Name));
+					continue;
+				}
+				Widget->Modify();
+				Host->Modify();
+				if (UPanelWidget* OldParent = Widget->GetParent())
+				{
+					OldParent->Modify();
+					OldParent->RemoveChild(Widget);
+				}
+				Host->SetContentForSlot(SlotName, Widget);
 			}
 			else
 			{
@@ -2434,6 +2474,19 @@ TSharedPtr<FJsonObject> FUnrealMCPGraphBuilder::DescribeWidget(const TSharedPtr<
 		if (UPanelWidget* Panel = Cast<UPanelWidget>(Widget))
 		{
 			for (int32 Index = 0; Index < Panel->GetChildrenCount(); ++Index) Walk(Panel->GetChildAt(Index), Depth + 1);
+		}
+		if (UUserWidget* Host = Cast<UUserWidget>(Widget))
+		{
+			TArray<FName> SlotNames;
+			Host->GetSlotNames(SlotNames);
+			for (const FName& SlotName : SlotNames)
+			{
+				if (UWidget* Content = Host->GetContentForSlot(SlotName))
+				{
+					Text += FString::ChrN((Depth + 1) * 2, TEXT(' ')) + TEXT("[named slot ") + SlotName.ToString() + TEXT("]\n");
+					Walk(Content, Depth + 2);
+				}
+			}
 		}
 	};
 	Walk(WBP->WidgetTree->RootWidget, 0);
